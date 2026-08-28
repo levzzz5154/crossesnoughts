@@ -1,0 +1,1 @@
+"""Web-free core: lidar + tracker. No server/UI imports."""

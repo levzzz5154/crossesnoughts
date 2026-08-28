@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy>=2.0,<3
+pygame-ce>=2.5
+pytest>=8

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YDLidar X3 Scene</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="hud">
+  <div id="hud-status">connecting…</div>
+  <div id="hud-seq">seq —</div>
+  <div id="hud-freq">freq —</div>
+  <div id="hud-track">track —</div>
+  <div id="hud-cell">cell —</div>
+</div>
+<div id="error" hidden></div>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

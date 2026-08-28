@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Lidar recordings are generated data, re-recordable from hardware.
+# Golden fixtures for regression tests are the exception.
+*.npz
+!tests/fixtures/*.npz
+
+# Vendored YDLidar SDK: it is its own git clone (30 MB, has .git/) kept only as
+# the reference for the header-verified constants in core/scan.py. Never commit
+# it here - track it in its own repo.
+YDLidar-SDK/
+
+# WorkBuddy agent state. The memory/ notes are durable project knowledge
+# (tracker failure modes, hardware notes), so those are kept.
+.workbuddy-ai/*
+!.workbuddy-ai/memory/
