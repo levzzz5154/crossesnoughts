@@ -13,7 +13,7 @@ import pytest
 from core.config import NoiseConfig, SceneConfig
 from core.lidar_source import BackgroundTable, make_lidar_source
 from core.recording import RecordingLidarSource, ReplayLidarSource, record
-from core.scan import LaserScan, SCAN_POINT_COUNT
+from core.scan import LaserPoint, LaserScan, SCAN_POINT_COUNT
 from core.sim import SimLidarSource
 from core.tracking import Tracker
 
@@ -134,6 +134,48 @@ def test_angle_grid_collapsed_when_uniform(tmp_path):
     assert np.allclose(
         [p.angle for p in scan.points], np.linspace(-np.pi, np.pi, SCAN_POINT_COUNT)
     )
+
+
+def test_variable_resolution_recording_roundtrip(tmp_path):
+    """Real-style 333/334/335-point scans flush and replay losslessly."""
+
+    class VariableSource:
+        def __init__(self):
+            self.i = 0
+            self.counts = [333, 335, 334]
+
+        def doProcessSimple(self, scan):
+            n = self.counts[self.i]
+            scan.points = [
+                LaserPoint(
+                    angle=float(-np.pi + 2 * np.pi * j / (n - 1)),
+                    range=float(1.0 + j / 10000),
+                )
+                for j in range(n)
+            ]
+            scan.size = n
+            scan.stamp = 1_700_000_000_000_000_000 + self.i * 100_000_000
+            self.i += 1
+            return True
+
+    path = tmp_path / "variable.npz"
+    rec = RecordingLidarSource(VariableSource(), path, kind="real", flush_every=1)
+    scan = LaserScan.blank()
+    for _ in range(3):
+        assert rec.doProcessSimple(scan)
+    rec.close()
+
+    with np.load(path, allow_pickle=False) as z:
+        assert z["ranges"].shape == (3, 335)
+        assert np.array_equal(z["sizes"], [333, 335, 334])
+        assert json.loads(str(z["meta"].item()))["variable_point_count"] is True
+
+    replay = ReplayLidarSource(SceneConfig(), NoiseConfig(), path, speed=0.0)
+    replay.turnOn()
+    for n in [333, 335, 334]:
+        assert replay.doProcessSimple(scan)
+        assert scan.size == n
+        assert len(scan.points) == n
 
 
 # --------------------------------------------------------------------- replay

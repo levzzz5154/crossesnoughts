@@ -61,8 +61,8 @@ def test_background_table_interpolation_roundtrip():
 
 def test_canonical_option_block():
     # The canonical block IS applied by real.py at initialize(); here we pin
-    # its contents (tri_test.py values + the FixedResolution fix) and that
-    # RealLidarSource carries it without importing ydlidar.
+    # its contents and that RealLidarSource carries it without importing
+    # ydlidar.
     from core import real
     from core.config import NoiseConfig, SceneConfig
 
@@ -77,7 +77,9 @@ def test_canonical_option_block():
     assert opts[real.LidarPropLidarType] == real.TYPE_TRIANGLE
     assert opts[real.LidarPropDeviceType] == real.YDLIDAR_TYPE_SERIAL
     assert opts[real.LidarPropSingleChannel] is True
-    assert opts[real.LidarPropFixedResolution] is True
+    # Motor speed varies, so the SDK must keep the actual point count rather
+    # than resize/truncate against its estimated fixed size.
+    assert opts[real.LidarPropFixedResolution] is False
     # constructing the source must NOT import the SWIG module (lazy)
     assert src._ydlidar is None
 
@@ -87,6 +89,30 @@ def test_canonical_option_block():
 
     body = inspect.getsource(real.RealLidarSource.initialize)
     assert "_apply_options" in body
+
+
+def test_real_point_iteration_accepts_variable_resolution():
+    from core.real import _iter_points
+
+    class Point:
+        def __init__(self, i):
+            self.angle = i * 0.01
+            self.range = 1.0 + i * 0.001
+            self.intensity = i
+
+    class Scan:
+        pass
+
+    scan = Scan()
+    scan.points = [Point(i) for i in range(335)]
+    scan.size = 335
+    points = list(_iter_points(scan))
+    assert len(points) == 335
+    assert points[-1] == pytest.approx((3.34, 1.334, 334.0))
+
+    # A malformed/mismatched SDK frame is still bounded by its actual buffer.
+    scan.size = 340
+    assert len(list(_iter_points(scan))) == 335
 
 
 def test_scan_size_formula():

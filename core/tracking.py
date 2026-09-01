@@ -121,8 +121,11 @@ class Tracker:
     def process(self, scan: LaserScan) -> TrackResult | None:
         if self._background is None:
             return None
-        angles = np.array([p.angle for p in scan.points], dtype=float)
-        ranges = np.array([p.range for p in scan.points], dtype=float)
+        # Real X3 scans are variable-resolution because the motor speed
+        # varies slightly from revolution to revolution.
+        pts = scan.points[: scan.size]
+        angles = np.array([p.angle for p in pts], dtype=float)
+        ranges = np.array([p.range for p in pts], dtype=float)
         now = scan.stamp / 1e9
         return self._process(angles, ranges, now)
 

@@ -62,7 +62,9 @@ def build_frame(
     points: valid hits precomputed in BOARD coords, clipped to [0,S]^2.
     points_invalid: indices of the 0-range points in the full scan.
     """
-    pts = scan.points
+    # The real X3 is intentionally variable-resolution; only the points
+    # declared by the scan header belong to this frame.
+    pts = scan.points[: scan.size]
     n = len(pts)
     angles = np.array([p.angle for p in pts], dtype=float)
     ranges = np.array([p.range for p in pts], dtype=float)

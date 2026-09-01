@@ -1,7 +1,7 @@
 """RealLidarSource: wraps ydlidar.CYdLidar (lazy import) behind the
 LidarSource ABC. Calibrates background from N averaged empty-board scans.
 
-The canonical option block (tri_test.py values + the FixedResolution fix) is
+The canonical option block (tri_test.py values, with variable resolution) is
 applied in initialize() — without it the SDK initializes at its default
 230400 baud and never sees this 115200 device.
 """
@@ -52,15 +52,11 @@ X3_BAUDRATE = 115200
 def _iter_points(swig_scan):
     """Yield (angle, range, intensity) for every point the SDK actually holds.
 
-    With LidarPropFixedResolution=True the SDK sizes the point buffer to its
-    computed "Single Fixed Size" (330 on this unit) but still reports
-    scan.size = 331 when the revolution really produced 331 points — it logs
-    "Real points 331 > fixed points 330" and leaves the two disagreeing.
-    Trusting scan.size then reads one past the end and raises IndexError,
-    which aborted _setup() and put the pipeline into a reconnect loop.
-
-    Clamping to the real buffer length costs at most one point per revolution
-    (~0.3%) and makes the mismatch harmless.
+    The X3's motor speed varies slightly, so a revolution can contain 333,
+    334, or 335 samples even when the requested scan frequency is 10 Hz.
+    The real source therefore runs the SDK in variable-resolution mode.  The
+    buffer length remains the final guard against an SDK size/buffer mismatch
+    so one bad frame cannot take the acquisition loop down.
     """
     n = min(int(swig_scan.size), len(swig_scan.points))
     for i in range(n):
@@ -69,8 +65,12 @@ def _iter_points(swig_scan):
 
 
 def canonical_option_block(port: str) -> dict[int, object]:
-    """The tri_test.py option block for the X3, plus the FixedResolution fix
-    (without it the real SDK emits variable-size scans, CYdLidar.cpp:53)."""
+    """The tri_test.py option block for the X3.
+
+    Fixed resolution is intentionally disabled: the SDK's fixed-size buffer
+    is derived from an assumed motor speed and can be smaller than the real
+    point count when the motor runs a little faster.
+    """
     return {
         LidarPropSerialPort: port,
         LidarPropSerialBaudrate: X3_BAUDRATE,
@@ -81,7 +81,7 @@ def canonical_option_block(port: str) -> dict[int, object]:
         LidarPropSingleChannel: True,
         LidarPropAbnormalCheckCount: 4,
         LidarPropSupportMotorDtrCtrl: True,
-        LidarPropFixedResolution: True,
+        LidarPropFixedResolution: False,
         LidarPropMaxAngle: 180.0,
         LidarPropMinAngle: -180.0,
         LidarPropMaxRange: 16.0,
@@ -93,10 +93,9 @@ def canonical_option_block(port: str) -> dict[int, object]:
 class RealLidarSource(LidarSource):
     """Real X3 via the installed ydlidar SWIG module (lazy import).
 
-    Canonical option block mirrors tri_test.cpp + the FixedResolution fix
-    (without it the real SDK emits variable-size scans). doProcessSimple
-    copies the SWIG scan into the caller's duck-typed LaserScan so consumers
-    never touch SWIG types.
+    The canonical option block mirrors tri_test.cpp with variable-resolution
+    scans enabled. doProcessSimple copies the SWIG scan into the caller's
+    duck-typed LaserScan so consumers never touch SWIG types.
     """
 
     def __init__(

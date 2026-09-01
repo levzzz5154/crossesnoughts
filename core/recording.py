@@ -19,8 +19,9 @@ Typical use:
 
 File format (.npz, compressed):
 
-    ranges     (T, N) float32   metres, 0.0 = invalid, stored exactly as read
+    ranges     (T, N) float32   metres, 0.0 = invalid, padded for variable N
     angles     (T, N) float32   rad; stored (N,) when every scan shares a grid
+    sizes      (T,) int32       valid point count for each scan
     stamps     (T,)   int64     ns, LaserScan.stamp
     bg_angles  (M,)   float64   background table captured at record time
     bg_ranges  (M,)   float64
@@ -55,7 +56,7 @@ from core.scan import (
 )
 from core import scan as scan_mod
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 MAX_SLEEP = 1.0  # s; cap per-scan pacing so a long gap cannot stall shutdown
 
 
@@ -104,11 +105,12 @@ class RecordingLidarSource:
         with self._lock:
             if self._closed:
                 return True
+            pts = scan.points[: scan.size]
             self._angles.append(
-                np.fromiter((p.angle for p in scan.points), dtype=np.float32, count=len(scan.points))
+                np.fromiter((p.angle for p in pts), dtype=np.float32, count=len(pts))
             )
             self._ranges.append(
-                np.fromiter((p.range for p in scan.points), dtype=np.float32, count=len(scan.points))
+                np.fromiter((p.range for p in pts), dtype=np.float32, count=len(pts))
             )
             self._stamps.append(int(scan.stamp))
             if self.flush_every and len(self._stamps) % self.flush_every == 0:
@@ -149,12 +151,26 @@ class RecordingLidarSource:
     def _write(self) -> None:
         if not self._stamps or self.path is None:
             return
-        angles = np.asarray(self._angles, dtype=np.float32)
-        ranges = np.asarray(self._ranges, dtype=np.float32)
+        sizes = np.asarray([a.size for a in self._angles], dtype=np.int32)
+        max_points = int(sizes.max(initial=0))
+        # Real X3 revolutions can have different sample counts.  Store a
+        # rectangular, zero-padded matrix plus the per-scan sizes so replay
+        # can emit every sample without asking NumPy to build a ragged array.
+        angles = np.zeros((sizes.size, max_points), dtype=np.float32)
+        ranges = np.zeros((sizes.size, max_points), dtype=np.float32)
+        for i, (a, r) in enumerate(zip(self._angles, self._ranges)):
+            n = int(a.size)
+            angles[i, :n] = a
+            ranges[i, :n] = r
         stamps = np.asarray(self._stamps, dtype=np.int64)
         # Collapse to a 1-D grid when every scan used the same angles
-        # (fixed-resolution real scans and the sim both do).
-        angles_out = angles[0] if angles.ndim == 2 and np.all(angles == angles[0]) else angles
+        # (the sim does; variable-resolution real scans stay 2-D).
+        uniform = (
+            sizes.size > 0
+            and np.all(sizes == sizes[0])
+            and np.all(angles == angles[0])
+        )
+        angles_out = angles[0] if uniform else angles
         meta = {
             "format": FORMAT_VERSION,
             "source_kind": self.kind,
@@ -162,11 +178,13 @@ class RecordingLidarSource:
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "n_scans": int(stamps.size),
             "point_count": int(ranges.shape[1]),
+            "variable_point_count": bool(not np.all(sizes == sizes[0])),
             "duration_s": float((stamps[-1] - stamps[0]) / 1e9) if stamps.size > 1 else 0.0,
         }
         arrays = {
             "ranges": ranges,
             "angles": angles_out,
+            "sizes": sizes,
             "stamps": stamps,
             "meta": np.array(json.dumps(meta)),
         }
@@ -220,6 +238,7 @@ class ReplayLidarSource(LidarSource):
             self._ranges = np.asarray(z["ranges"], dtype=np.float32)
             self._stamps = np.asarray(z["stamps"], dtype=np.int64)
             angles = np.asarray(z["angles"], dtype=np.float32)
+            sizes = np.asarray(z["sizes"], dtype=np.int32) if "sizes" in z else None
             self.meta = json.loads(str(z["meta"].item())) if "meta" in z else {}
             if "bg_angles" in z and "bg_ranges" in z:
                 self._bg = BackgroundTable(
@@ -232,14 +251,26 @@ class ReplayLidarSource(LidarSource):
             raise ValueError(
                 f"replay file scan/stamp mismatch: {self._ranges.shape[0]} vs {self._stamps.shape[0]}"
             )
+        self._n = int(self._ranges.shape[0])
+        self._pts = int(self._ranges.shape[1])
+        if sizes is None:
+            # Format 1 recordings were fixed-resolution and have no sizes
+            # array; retain their original behavior.
+            self._sizes = np.full(self._n, self._pts, dtype=np.int32)
+        else:
+            if sizes.ndim != 1 or sizes.shape[0] != self._n:
+                raise ValueError(
+                    f"replay file scan/size mismatch: {self._n} vs {sizes.shape[0] if sizes.ndim == 1 else sizes.shape}"
+                )
+            if np.any(sizes < 0) or np.any(sizes > self._pts):
+                raise ValueError("replay file contains invalid scan sizes")
+            self._sizes = sizes
         if angles.ndim == 1:
             self._angles_2d = None
             self._angles_1d = angles
         else:
             self._angles_2d = angles
             self._angles_1d = angles[0] if angles.shape[0] else angles
-        self._n = int(self._ranges.shape[0])
-        self._pts = int(self._ranges.shape[1])
         if self._n == 0:
             raise ValueError(f"replay file has no scans: {self.path}")
 
@@ -368,13 +399,33 @@ class ReplayLidarSource(LidarSource):
         return self._fallback_background()
 
     def _fallback_background(self, k: int = 30) -> BackgroundTable:
-        block = self._ranges[: min(k, self._n)]
-        out = np.zeros(block.shape[1], dtype=float)
-        for j in range(block.shape[1]):
-            col = block[:, j]
-            v = col[col > 0.0]
-            out[j] = float(np.median(v)) if v.size else 0.0
-        return BackgroundTable(self._angle_row(0).astype(float), out)
+        # Quantize variable-resolution samples to the canonical grid just as
+        # real-device calibration does.  This keeps the fallback valid when
+        # a recording has no captured background table.
+        from core.scan import SCAN_ANGLE_INCREMENT, SCAN_MIN_ANGLE, SCAN_POINT_COUNT, scan_angles
+
+        angles = np.concatenate([
+            self._angle_row(i)[: int(self._sizes[i])] for i in range(min(k, self._n))
+        ])
+        ranges = np.concatenate([
+            self._ranges[i, : int(self._sizes[i])] for i in range(min(k, self._n))
+        ])
+        valid = ranges > 0.0
+        if not np.any(valid):
+            return BackgroundTable(scan_angles(), np.zeros(SCAN_POINT_COUNT, dtype=float))
+        bins = np.arange(SCAN_POINT_COUNT + 1) - 0.5
+        edges = SCAN_MIN_ANGLE + bins * SCAN_ANGLE_INCREMENT
+        idx = np.clip(np.digitize(angles[valid], edges) - 1, 0, SCAN_POINT_COUNT - 1)
+        med = np.full(SCAN_POINT_COUNT, np.nan)
+        for i in range(SCAN_POINT_COUNT):
+            selected = ranges[valid][idx == i]
+            if selected.size:
+                med[i] = np.median(selected)
+        grid = scan_angles()
+        good = ~np.isnan(med)
+        if good.sum() < 2:
+            return BackgroundTable(grid, np.zeros(SCAN_POINT_COUNT, dtype=float))
+        return BackgroundTable(grid, np.interp(grid, grid[good], med[good]))
 
     # -- internals -------------------------------------------------------
     def _pace(self) -> None:
@@ -391,9 +442,9 @@ class ReplayLidarSource(LidarSource):
             time.sleep(min(dt, MAX_SLEEP))
 
     def _fill(self, i: int, scan: LaserScan) -> None:
-        r = self._ranges[i]
-        a = self._angle_row(i)
-        n = int(r.size)
+        n = int(self._sizes[i])
+        r = self._ranges[i, :n]
+        a = self._angle_row(i)[:n]
         pts = scan.points
         if len(pts) != n:
             scan.points = [LaserPoint() for _ in range(n)]
