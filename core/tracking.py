@@ -43,6 +43,60 @@ class TrackResult:
     age: int
 
 
+class SimpleTracker:
+    """Small board-only tracker for setup and debugging.
+
+    This is deliberately a detector rather than a filter.  It projects valid
+    ranges into board coordinates, drops anything outside the configured board
+    footprint, trims a tiny perimeter occupied by the empty board edge, and
+    reports the median remaining point.  There is no calibration,
+    clustering, prediction, association, or coasting; when there are no
+    interior board hits the result is simply ``None``.
+
+    The median keeps a single return from moving the preview as much as a mean
+    would, while keeping the implementation useful as a deliberately dumb
+    baseline next to :class:`Tracker`.  Board orientation is already handled
+    by ``RotatedLidarSource`` before this class sees a scan.
+    """
+
+    EDGE_MARGIN = 0.03  # m; reject the board rim, not the usable board area
+
+    def __init__(self, scene: SceneConfig, noise: NoiseConfig):
+        self.scene = scene
+        self.noise = noise
+        self._age = 0
+
+    def reset(self) -> None:
+        self._age = 0
+
+    def process(self, scan: LaserScan) -> TrackResult | None:
+        pts = scan.points[: scan.size]
+        if not pts:
+            return None
+        angles = np.asarray([p.angle for p in pts], dtype=float)
+        ranges = np.asarray([p.range for p in pts], dtype=float)
+        valid = (ranges > self.noise.min_range) & (ranges <= self.noise.max_range)
+        if not np.any(valid):
+            return None
+
+        angles, ranges = angles[valid], ranges[valid]
+        x, y = tf.polar_to_board(ranges, angles)
+        margin = min(self.EDGE_MARGIN, self.scene.board_size / 4.0)
+        inside = (
+            (x >= margin) & (x <= self.scene.board_size - margin) &
+            (y >= margin) & (y <= self.scene.board_size - margin)
+        )
+        if not np.any(inside):
+            return None
+
+        x, y = x[inside], y[inside]
+        self._age += 1
+        return TrackResult(
+            x=float(np.median(x)), y=float(np.median(y)),
+            vx=0.0, vy=0.0, conf=1.0, missed=0, age=self._age,
+        )
+
+
 class Tracker:
     def __init__(self, scene: SceneConfig, noise: NoiseConfig):
         self.scene = scene

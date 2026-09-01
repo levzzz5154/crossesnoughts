@@ -60,18 +60,33 @@ def test_background_table_interpolation_roundtrip():
 
 
 def test_canonical_option_block():
-    sim = SimLidarSource.__new__(SimLidarSource)  # avoid scene init
-    # The canonical block is exercised by real.py; here we pin the constants
-    # that real.py uses (tri_test.cpp values + FixedResolution fix).
+    # The canonical block IS applied by real.py at initialize(); here we pin
+    # its contents (tri_test.py values + the FixedResolution fix) and that
+    # RealLidarSource carries it without importing ydlidar.
     from core import real
+    from core.config import NoiseConfig, SceneConfig
 
     assert real.TYPE_TRIANGLE == 1
     assert real.YDLIDAR_TYPE_SERIAL == 0
-    # FixedResolution must be set in the canonical block
+    assert real.X3_BAUDRATE == 115200  # Dataset.md X3 row, NOT the SDK default
+
+    src = real.RealLidarSource(SceneConfig(), NoiseConfig(), port="/dev/ttyUSB0")
+    opts = src._opts
+    assert opts[real.LidarPropSerialPort] == "/dev/ttyUSB0"
+    assert opts[real.LidarPropSerialBaudrate] == 115200
+    assert opts[real.LidarPropLidarType] == real.TYPE_TRIANGLE
+    assert opts[real.LidarPropDeviceType] == real.YDLIDAR_TYPE_SERIAL
+    assert opts[real.LidarPropSingleChannel] is True
+    assert opts[real.LidarPropFixedResolution] is True
+    # constructing the source must NOT import the SWIG module (lazy)
+    assert src._ydlidar is None
+
+    # the block is actually applied in initialize(): pin the source text so a
+    # regression (initialize without _apply_options) can't slip through
     import inspect
 
-    src = inspect.getsource(real)
-    assert "LidarPropFixedResolution" in src
+    body = inspect.getsource(real.RealLidarSource.initialize)
+    assert "_apply_options" in body
 
 
 def test_scan_size_formula():

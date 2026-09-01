@@ -6,6 +6,7 @@ const hud = {
   status: document.getElementById("hud-status"),
   seq: document.getElementById("hud-seq"),
   freq: document.getElementById("hud-freq"),
+  mode: document.getElementById("hud-mode"),
   track: document.getElementById("hud-track"),
   cell: document.getElementById("hud-cell"),
 };
@@ -46,6 +47,7 @@ let positions = null;
 
 function buildScene(cfg) {
   S = cfg.board_size;
+  hud.mode.textContent = "mode " + (cfg.tracking_mode || "advanced");
   scene.clear();
   scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 0.9));
   const dir2 = new THREE.DirectionalLight(0xffffff, 1.2);

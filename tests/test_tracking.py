@@ -4,9 +4,10 @@ import pytest
 
 from core.config import NoiseConfig, SceneConfig
 from core.lidar_source import BackgroundTable
-from core.scan import LaserScan
+from core.scan import LaserPoint, LaserScan
 from core.sim import SimLidarSource
-from core.tracking import BG_THRESHOLD, Tracker
+from core.tracking import BG_THRESHOLD, SimpleTracker, Tracker
+from core import transforms as tf
 
 
 def _tracker(scene=None, seed=42):
@@ -37,6 +38,31 @@ def test_static_centroid_median_err():
             errs.append(np.hypot(res.x - x, res.y - y))
     assert np.median(errs) < 0.025  # 2.5 cm
     assert np.percentile(errs, 95) < 0.05
+
+
+def test_simple_tracker_needs_no_background_and_stays_on_board():
+    """The simple mode is only a board-coordinate filter + median."""
+    scene = SceneConfig(board_size=2.0)
+    tr = SimpleTracker(scene, NoiseConfig(enabled=False))
+    xy = np.array([[0.70, 1.10], [0.72, 1.08], [0.68, 1.12]])
+    ranges, angles = tf.board_to_polar(xy[:, 0], xy[:, 1])
+    scan = LaserScan(
+        points=[LaserPoint(angle=float(a), range=float(r))
+                for a, r in zip(angles, ranges)],
+        size=3,
+    )
+    result = tr.process(scan)  # no set_background() call by design
+    assert result is not None
+    assert result.x == pytest.approx(0.70)
+    assert result.y == pytest.approx(1.10)
+
+    outside_r, outside_a = tf.board_to_polar(
+        np.array([2.1]), np.array([0.2]))
+    outside = LaserScan(
+        points=[LaserPoint(angle=float(outside_a[0]), range=float(outside_r[0]))],
+        size=1,
+    )
+    assert tr.process(outside) is None
 
 
 def test_static_far_corner_accuracy():

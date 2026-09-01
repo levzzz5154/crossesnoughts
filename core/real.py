@@ -1,5 +1,9 @@
 """RealLidarSource: wraps ydlidar.CYdLidar (lazy import) behind the
 LidarSource ABC. Calibrates background from N averaged empty-board scans.
+
+The canonical option block (tri_test.py values + the FixedResolution fix) is
+applied in initialize() — without it the SDK initializes at its default
+230400 baud and never sees this 115200 device.
 """
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ from core.config import NoiseConfig, SceneConfig
 from core.lidar_source import BackgroundTable, LidarSource
 from core import scan as scan_mod
 from core.scan import (
+    LaserPoint,
     LaserScan,
     LidarPropAbnormalCheckCount,
     LidarPropAutoReconnect,
@@ -40,12 +45,58 @@ from core.scan import scan_angles
 
 _N_AVG = 30  # calibration scans
 
+# Baudrate of the X3 (Dataset.md row "X3/X3 Pro" — NOT the SDK default 230400).
+X3_BAUDRATE = 115200
+
+
+def _iter_points(swig_scan):
+    """Yield (angle, range, intensity) for every point the SDK actually holds.
+
+    With LidarPropFixedResolution=True the SDK sizes the point buffer to its
+    computed "Single Fixed Size" (330 on this unit) but still reports
+    scan.size = 331 when the revolution really produced 331 points — it logs
+    "Real points 331 > fixed points 330" and leaves the two disagreeing.
+    Trusting scan.size then reads one past the end and raises IndexError,
+    which aborted _setup() and put the pipeline into a reconnect loop.
+
+    Clamping to the real buffer length costs at most one point per revolution
+    (~0.3%) and makes the mismatch harmless.
+    """
+    n = min(int(swig_scan.size), len(swig_scan.points))
+    for i in range(n):
+        p = swig_scan.points[i]
+        yield float(p.angle), float(p.range), float(p.intensity)
+
+
+def canonical_option_block(port: str) -> dict[int, object]:
+    """The tri_test.py option block for the X3, plus the FixedResolution fix
+    (without it the real SDK emits variable-size scans, CYdLidar.cpp:53)."""
+    return {
+        LidarPropSerialPort: port,
+        LidarPropSerialBaudrate: X3_BAUDRATE,
+        LidarPropLidarType: TYPE_TRIANGLE,
+        LidarPropDeviceType: YDLIDAR_TYPE_SERIAL,
+        LidarPropScanFrequency: 10.0,
+        LidarPropSampleRate: 3,
+        LidarPropSingleChannel: True,
+        LidarPropAbnormalCheckCount: 4,
+        LidarPropSupportMotorDtrCtrl: True,
+        LidarPropFixedResolution: True,
+        LidarPropMaxAngle: 180.0,
+        LidarPropMinAngle: -180.0,
+        LidarPropMaxRange: 16.0,
+        LidarPropMinRange: 0.08,
+        LidarPropIntenstiy: False,
+    }
+
 
 class RealLidarSource(LidarSource):
     """Real X3 via the installed ydlidar SWIG module (lazy import).
 
     Canonical option block mirrors tri_test.cpp + the FixedResolution fix
-    (without it the real SDK emits variable-size scans).
+    (without it the real SDK emits variable-size scans). doProcessSimple
+    copies the SWIG scan into the caller's duck-typed LaserScan so consumers
+    never touch SWIG types.
     """
 
     def __init__(
@@ -61,7 +112,9 @@ class RealLidarSource(LidarSource):
         self.n_avg = n_avg
         self._ydlidar = None
         self._laser = None
-        self._opts: dict[int, object] = {}
+        self._swig_scan = None
+        # Canonical block, overridable via setlidaropt before initialize().
+        self._opts: dict[int, object] = canonical_option_block(self.port)
         self._calibrated = False
 
     # --- lazy import -------------------------------------------------------
@@ -71,12 +124,19 @@ class RealLidarSource(LidarSource):
 
             self._ydlidar = ydlidar
             self._laser = ydlidar.CYdLidar()
+            self._swig_scan = ydlidar.LaserScan()
+
+    def _apply_options(self) -> None:
+        """Push the option block into the SWIG laser before initialize()."""
+        for prop, value in self._opts.items():
+            self._laser.setlidaropt(prop, value)
 
     # -- SWIG-mirroring surface -------------------------------------------
     def setlidaropt(self, prop: int, value) -> bool:
         self._opts[prop] = value
-        self._import()
-        return bool(self._laser.setlidaropt(prop, value))
+        if self._laser is not None:
+            return bool(self._laser.setlidaropt(prop, value))
+        return True  # applied later, in initialize()
 
     def getlidaropt_toInt(self, prop: int) -> tuple[bool, int]:
         self._import()
@@ -102,6 +162,7 @@ class RealLidarSource(LidarSource):
         self._import()
         y = self._ydlidar
         y.os_init()
+        self._apply_options()
         ok = bool(self._laser.initialize())
         if not ok:
             y.os_shutdown()
@@ -112,12 +173,29 @@ class RealLidarSource(LidarSource):
         return bool(self._laser.turnOn())
 
     def doProcessSimple(self, scan: LaserScan) -> bool:
-        """Fill scan in place from the real device (blocks up to 1 s)."""
+        """Fill scan in place from the real device (blocks up to 1 s).
+
+        The caller passes our duck-typed LaserScan; internally we use the
+        SWIG LaserScan and copy the fields across (the SWIG module rejects
+        foreign scan objects).
+        """
         self._import()
-        ok = bool(self._laser.doProcessSimple(scan))
-        if ok:
-            scan.moduleNum = scan_mod.MODULE_NUM_X3
-        return ok
+        ok = bool(self._laser.doProcessSimple(self._swig_scan))
+        if not ok:
+            return False
+        src = self._swig_scan
+        pts = [
+            LaserPoint(angle=a, range=r, intensity=i)
+            for a, r, i in _iter_points(src)
+        ]
+        scan.stamp = int(src.stamp)
+        scan.scanFreq = float(src.scanFreq)
+        scan.sampleRate = float(src.sampleRate)
+        scan.size = len(pts)
+        scan.points = pts
+        # The SDK reports moduleNum == 0 for the X3; consumers expect 6.
+        scan.moduleNum = scan_mod.MODULE_NUM_X3
+        return True
 
     def turnOff(self) -> bool:
         self._import()
@@ -142,9 +220,9 @@ class RealLidarSource(LidarSource):
         ranges: list[float] = []
         for _ in range(self.n_avg):
             if self._laser.doProcessSimple(scan):
-                for i in range(scan.size):
-                    angles.append(float(scan.points[i].angle))
-                    ranges.append(float(scan.points[i].range))
+                for a, r, _intensity in _iter_points(scan):
+                    angles.append(a)
+                    ranges.append(r)
             time.sleep(0.05)
         if not angles:
             raise RuntimeError("no scans captured for background calibration")

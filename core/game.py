@@ -1,9 +1,11 @@
 """GameState + TapDetector: pure, headless-testable game logic (web-free).
 
-Rules (plan §10): 3x3 grid; turns alternate X/O after each tap; a tap may
-overwrite ANY cell including the opponent's; win = 3-in-a-row checked after
-every move (overwrites can break lines, so no per-cell lock); no draw state;
-New Game clears the grid and resets turn to X.
+Rules: 3x3 grid; turns alternate X/O after each tap; a tap may overwrite the
+OPPONENT'S cell (that's the point of this variant) and the turn flips as
+usual; re-tapping a cell that already holds your OWN mark is a NO-OP (no
+move, no turn flip — you don't waste your turn on your own glyph); win =
+3-in-a-row checked after every move (overwrites can break lines, so no
+per-cell lock); no draw state; New Game clears the grid and resets turn to X.
 """
 from __future__ import annotations
 
@@ -60,6 +62,9 @@ class GameState:
 
         Returns True if a move was committed. cell = floor(x*3/S),
         floor(y*3/S) clamped to [0,2]; pointer outside [0,S]^2 is not a tap.
+        Tapping a cell that already holds the CURRENT player's own mark is a
+        no-op (returns False, turn unchanged) — overwriting the opponent's
+        mark remains allowed and commits normally.
         """
         if self.winner is not None:
             return False
@@ -69,6 +74,8 @@ class GameState:
         cell_y = min(GRID - 1, max(0, int(y * GRID / board_size)))
         cell = (cell_x, cell_y)
         prev = self.grid[cell_y][cell_x]
+        if prev is self.turn:
+            return False  # own-cell tap: no-op, turn does NOT flip
         self.grid[cell_y][cell_x] = self.turn
         self.move_count += 1
         if prev is not None:
@@ -148,3 +155,30 @@ class TapDetector:
         self._cell = None
         self._entered = None
         self._fired_cell = None
+
+
+class AppearanceDetector:
+    """Fire once when a player first appears, with no dwell.
+
+    A continuous track is one presence.  Movement while present is ignored;
+    losing the track only arms the next appearance and never emits a tap.
+    ``t`` is accepted for drop-in use by the scan loop, but is intentionally
+    unused.
+    """
+
+    def __init__(self):
+        self._present = False
+
+    def update(self, x: float, y: float, board_size: float,
+               t: float | None = None) -> bool:
+        if not (0.0 <= x <= board_size and 0.0 <= y <= board_size):
+            self._present = False
+            return False
+        if self._present:
+            return False
+        self._present = True
+        return True
+
+    def release(self) -> None:
+        """Arm the detector for the next appearance."""
+        self._present = False

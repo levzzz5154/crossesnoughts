@@ -38,10 +38,10 @@ def test_dataclass_field_names_match_swig():
 
 
 def test_config_validation():
-    for bad in (0.5, 2.5, 3.5, 4.0):
+    for bad in (0.05, 2.5, 3.5, 4.0):
         with pytest.raises(ValueError):
             SceneConfig(board_size=bad)
-    for good in (1.0, 1.5, 2.0):
+    for good in (0.1, 0.5, 1.0, 1.5, 2.0):
         SceneConfig(board_size=good)
     assert SceneConfig().object_radius == 0.10
     assert SceneConfig().board_size == 2.0

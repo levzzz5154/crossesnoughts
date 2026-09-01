@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from core.config import NoiseConfig, SceneConfig
 from core.lidar_source import make_lidar_source
 from core.scan import LaserScan
-from core.tracking import Tracker
+from core.tracking import SimpleTracker, Tracker
 from web.frames import (
     SceneModel,
     build_frame,
@@ -37,11 +37,13 @@ RECONNECT_BACKOFF = 1.0  # s (client side)
 class ScanLoop:
     """Owns the LidarSource; runs in a dedicated thread."""
 
-    def __init__(self, source, tracker: Tracker, model: SceneModel, scene: SceneConfig):
+    def __init__(self, source, tracker, model: SceneModel, scene: SceneConfig,
+                 tracking_mode: str = "advanced"):
         self.source = source
         self.tracker = tracker
         self.model = model
         self.scene = scene
+        self.tracking_mode = tracking_mode
         self.stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         # Capability detection, not identity checks: a sim exposes a movable
@@ -69,7 +71,8 @@ class ScanLoop:
                 return
             if not src.turnOn():
                 return
-            self.tracker.set_background(src.calibrate_background())
+            if self.tracking_mode == "advanced":
+                self.tracker.set_background(src.calibrate_background())
             scan = LaserScan.blank()
             while not self.stop_event.is_set():
                 # Drain control commands between doProcessSimple calls.
@@ -111,8 +114,11 @@ class ScanLoop:
         if op == "reset" and self._sim is not None:
             seed = int(cmd.get("seed", 0))
             self._sim.reset(seed)
-            # re-calibrate background at the next scan boundary
-            self.tracker.set_background(self.source.calibrate_background())
+            if self.tracking_mode == "advanced":
+                # re-calibrate background at the next scan boundary
+                self.tracker.set_background(self.source.calibrate_background())
+            else:
+                self.tracker.reset()
         elif op == "reset" and self._replay is not None:
             # restart the recording from the first scan and re-acquire
             self._replay.seek(0)
@@ -136,15 +142,19 @@ def create_app(
     replay_speed: float = 1.0,
     record_path: str | None = None,
     record_note: str = "",
+    tracking_mode: str = "advanced",
 ) -> FastAPI:
     source = make_lidar_source(
         lidar_kind, scene=scene, noise=noise, seed=seed, port=port,
         replay_path=replay_path, replay_loop=replay_loop, replay_speed=replay_speed,
         record_path=record_path, record_note=record_note,
     )
-    tracker = Tracker(scene, noise)
+    if tracking_mode not in ("advanced", "simple"):
+        raise ValueError("tracking_mode must be 'advanced' or 'simple'")
+    tracker = SimpleTracker(scene, noise) if tracking_mode == "simple" \
+        else Tracker(scene, noise)
     model = SceneModel(scene, scan_freq=source.scan_freq if hasattr(source, "scan_freq") else 10.0)
-    loop = ScanLoop(source, tracker, model, scene)
+    loop = ScanLoop(source, tracker, model, scene, tracking_mode=tracking_mode)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -157,7 +167,7 @@ def create_app(
     @app.websocket("/ws")
     async def ws_endpoint(ws: WebSocket):
         await ws.accept()
-        await ws.send_text(hello_message(scene, model.scan_freq))
+        await ws.send_text(hello_message(scene, model.scan_freq, tracking_mode))
         await ws.send_text(scene_message(scene))
         last_seq = 0
         try:

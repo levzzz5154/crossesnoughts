@@ -1,1 +1,1 @@
-from game.state import GameState, TapDetector  # noqa: F401
+from game.state import AppearanceDetector, GameState, TapDetector  # noqa: F401

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-BOARD_SIZE_MIN = 1.0
+BOARD_SIZE_MIN = 0.1
 BOARD_SIZE_MAX = 2.0
 @dataclass(frozen=True)
 class SceneConfig:

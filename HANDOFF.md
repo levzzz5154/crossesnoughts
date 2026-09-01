@@ -1,16 +1,18 @@
 # HANDOFF — YDLidar X3 Emulator + 3D Scene + Crosses & Noughts
 
 **For:** next agent picking up this repo.
-**Date:** 2026-08-29
-**Status:** PLAN.md fully implemented, 96/96 tests passing, features verified live.
-**Added this session:** record/replay (`core/recording.py`) — capture raw scans from
-sim *or* real hardware to .npz and play them back with no device attached (§11).
-**Fixed this session:** (a) the game now plays from the lidar (`--pointer lidar`,
-default) instead of the mouse, and the dwell clock runs off scan time so a
-held-still pointer registers a tap (§6, §9); (b) `_acquire` picks the nearest
-cluster instead of the largest, which was locking onto a mixed-pixel fragment up
-to 70 cm behind a static object while reporting full confidence (§9). One sharp
-tracker issue remains — single-point cluster acceptance, §10 #1.
+**Date:** 2026-08-31
+**Status:** 118/118 tests passing. Settings screen + calibration + device probe + teams + win overlay all live, headless-verified.
+**Added this session (2026-08-31):**
+- **Settings screen** (`game/settings_screen.py`): pre-game screen with live device status, source picker (Sim/Real/Replay), 360° radar calibration view with yaw slider + board-size slider, background recalibration, tracking check (live track ring + cell highlight + confidence), team name fields + image upload, Start Game button.
+- **Pipeline** (`game/pipeline.py`): shared scan thread for both settings and game phases, with control ops for source switch, board-size/yaw/calibrate/new_game. Replaces the old `game/run.py` scan loop. Fixed a scan-then-move ordering bug that caused tracker re-acquisition to latch onto stale position after a pointer jump.
+- **Device probe** (`game/devstatus.py`): stdlib-only serial probe (termios), lists candidate ports, sniffs 1.5 s for streaming + Hz + points/rev + checksums. No SWIG needed. Verified live: 12.05 Hz, 332 pts, 0 bad checksums.
+- **Yaw wrapper** (`core/yaw.py`): `RotatedLidarSource` applies a runtime-adjustable yaw offset to scan angles in `doProcessSimple` AND shifts the background table by the same yaw in `calibrate_background`, so the 90° board window can align to any physical lidar orientation.
+- **Settings persistence** (`core/settings.py`): `GameSettings` dataclass (board_size, yaw_deg, source kind/params, team X/O name+image, window size) with JSON load/save.
+- **Real lidar fix** (`core/real.py`): now applies the canonical tri_test option block (baud 115200, TYPE_TRIANGLE, YDLIDAR_TYPE_SERIAL, SampleRate 3, SingleChannel True, FixedResolution True) before `initialize()`.
+- **Own-cell no-op rule** (`core/game.py`): tapping your own cell is a no-op (no move, no turn flip). Overwriting the opponent's cell is still allowed and flips the turn.
+- **Game renderer** (`game/render.py`): team names in status bar, win overlay (dimmed board + winner name + big logo image + "N — play again"), F key toggles fullscreen, dynamic canvas sizing for resizable window.
+**Previous sessions:** record/replay (`core/recording.py`); lidar pointer mode; nearest-cluster acquisition fix.
 
 ---
 
@@ -31,16 +33,10 @@ Full design rationale, coordinate conventions, noise model, tracking math, and a
 
 ```bash
 cd /home/levzzz/Documents/EAI-X3-X3ProLidar/crossesnoughts
-python -m pytest tests/ -q          # 96 passed
-python -m web.run --lidar sim       # 3D viz at http://127.0.0.1:8000
-python -m game.run --lidar sim      # 2D pygame window (no web server needed)
-python -m game.run --lidar sim --pointer mouse   # tracker out of the loop
-
-# record 20 s of real hardware, then replay it with no device attached
-python -m core.recording --lidar real --out session.npz --seconds 20 --note "finger sweep"
-python -m web.run --lidar replay --replay-file session.npz
-# ...or record whatever the server is currently showing (sim or real)
-python -m web.run --lidar real --record session.npz
+/home/levzzz/miniconda3/bin/python -m pytest tests/ -q   # 118 passed
+/home/levzzz/miniconda3/bin/python -m game.run            # settings screen → game
+/home/levzzz/miniconda3/bin/python -m game.run --lidar sim  # skip source picker, start with sim
+# F = toggle fullscreen in game phase; ESC = back to settings; N = new game
 ```
 
 CLI flags:
@@ -84,15 +80,19 @@ core/sim.py           SimLidarSource — SWIG twin, 10 Hz pacing inside doProces
 core/real.py          RealLidarSource — lazy ydlidar import, canonical option block + FixedResolution=True, 30-scan median calibration
 core/recording.py     RecordingLidarSource (wraps ANY source, dumps scans to .npz) + ReplayLidarSource (plays .npz back through the same surface) + record() + `python -m core.recording`
 core/tracking.py      Tracker — BG subtraction (0.10 m), clustering (3-bin / 0.25 m), range-consistency (median+3σ), inverse-variance centroid, arc-centroid bias r_obj(1+cos β)/2, alpha-beta (α=0.6, β=0.3, gate 0.5 m, missed>10 → re-acquire)
-core/game.py          GameState (3×3, overwrite, per-move win, no draw) + TapDetector (0.3 s dwell)
+core/game.py          GameState (3×3, overwrite opponent, own-cell no-op, per-move win, no draw) + TapDetector (0.3 s dwell)
+core/yaw.py           RotatedLidarSource — yaw wrapper, rotates angles + background for board-window alignment
+core/settings.py      GameSettings dataclass + JSON load/save (board_size, yaw, source, teams, window)
+game/pipeline.py      Shared scan thread (settings→game), control ops, sim-mouse-hand integration
+game/devstatus.py     Stdlib serial device probe (list ports, sniff Hz/pts/checksums)
+game/settings_screen.py  Pre-game settings: device status, source picker, calibration radar, team config
 web/frames.py         Frame.to_json, SceneModel (latest-wins + control queue), hello/scene messages
 web/main.py           create_app, /ws endpoint, ScanLoop (thread + control handling)
 web/run.py            CLI
 web/static/           index.html, main.js (three.js scene + click/drag + grid overlay), style.css, vendor/ (three.module.js + three.core.js + OrbitControls.js, r185)
-game/state.py         re-exports core/game
-game/render.py        pygame renderer (grid, glyphs, hover, status)
-game/run.py           CLI, two-thread loop
-tests/                test_transforms, test_raycast, test_noise, test_sim_api, test_swap, test_tracking, test_wire, test_game, test_e2e, test_recording
+game/render.py        pygame renderer (grid, glyphs, hover, status, team names, win overlay, fullscreen)
+game/run.py           CLI + two-phase loop (settings → game → ESC → settings)
+tests/                test_transforms, test_raycast, test_noise, test_sim_api, test_swap, test_tracking, test_wire, test_game, test_e2e, test_recording, test_yaw, test_settings, test_pipeline
 requirements.txt      fastapi, uvicorn[standard], numpy>=2,<3, pygame-ce, pytest
 ```
 
@@ -107,10 +107,20 @@ requirements.txt      fastapi, uvicorn[standard], numpy>=2,<3, pygame-ce, pytest
 
 ## 6. Game (2D pygame)
 
-- Tap = pointer dwell 0.3 s in a cell (TapDetector, no auto-repeat, re-fire on re-entry). Turn alternates X/O per tap. Overwrite ANY cell allowed. Win checked per move. No draw state. `N` = New Game (applies at next scan boundary via control queue).
-- **`--pointer lidar` (default)**: moves are committed from the TRACKED position. In sim mode the mouse acts as the hand — it moves the simulated object, and the tap still comes out of the full raycast → noise → tracking pipeline, so sim exercises the same path a real finger would. With real hardware or a replay the mouse is ignored entirely. The hover highlight and the new amber pointer ring both follow the tracker, lag and all, not the raw mouse.
-- **`--pointer mouse`**: legacy. The tap position is the raw mouse position, bypassing the tracker. Useful for testing game rules in isolation.
-- **Known limitation**: the web viz and game are SEPARATE processes with separate sim instances — no shared state. Click-dragging in the browser does not drive the game.
+- **Two-phase app**: Settings screen → Game phase. ESC returns to settings; the scan thread runs continuously across both phases.
+- **Settings screen** (`game/settings_screen.py`):
+  - Device status: lists serial ports, shows streaming/Hz/points/checksums via `game/devstatus.py` probe (stdlib termios, no SWIG).
+  - Source picker: Sim / Real / Replay — each with live status. Selecting a source reconfigures the pipeline via a control op.
+  - Calibration: 360° top-down radar view with the 90° board-quadrant overlay (yaw-aligned), board-size slider (1.0–2.0 m), yaw slider (0–360°), recalibrate background button, tracking check (live track ring + cell highlight + confidence readout).
+  - Teams: X/O name text fields + image upload (tkinter file dialog, PNG/JPG).
+  - Start Game button (or Enter key).
+- **Game phase** (`game/render.py` + `game/run.py`):
+  - Tap = pointer dwell 0.3 s in a cell. Turn alternates X/O. Overwrite opponent's cell allowed and flips the turn. **Own-cell tap = no-op** (no move, no turn flip). Win checked per move. No draw. `N` = New Game.
+  - Team names shown in status bar ("Red's turn (X)" / "Blue wins!").
+  - Win overlay: dimmed board, winner name + big team logo image, "N — play again".
+  - F = toggle fullscreen (remembers monitor). Window is resizable; size persisted in settings.json.
+  - `--pointer lidar` (default): moves from tracked position. `--pointer mouse`: raw mouse bypass.
+  - Sim mode: mouse drives the simulated hand through the full raycast → noise → tracking pipeline.
 
 ## 7. Key decisions & deviations from PLAN.md
 
@@ -123,11 +133,10 @@ requirements.txt      fastapi, uvicorn[standard], numpy>=2,<3, pygame-ce, pytest
 
 ## 8. Verification evidence (already done)
 
-- `pytest`: 96 passed (transforms pins incl. the θ=+π/4 sign-fix test; raycast exactness |err|<1e-9; noise stats; sim API/parity; swap surface vs installed ydlidar; tracking: median <2.5 cm continuous path, far-corner <3 cm, never lost >3 scans, BG FP <1%, mixed-pixel rejection; wire schema; game rules; e2e WS hello/scene/frames/reset/latest-wins + full headless game; **record/replay round trip incl. replay-driven tracking <5 cm**; dwell-clock regression guards; lidar-pointer-mode contract test).
-- Real app, driven in-process with a scripted pointer (SDL dummy driver): a single mouse move followed by 3 s of holding **perfectly still** now commits exactly one move in both `--pointer lidar` (at (0.339, 0.333), 0.54 cm off the raw mouse point — i.e. it came through the tracker) and `--pointer mouse` (exactly (0.333, 0.333)). Before the fix, lidar mode committed two phantom moves at the old object position and mouse mode committed none.
-- Record/replay live (headless, real server + WS): CLI recorder 31 scans/3.00 s with background; server `--record` stored 35 scans with the note; paced replay streamed monotonically with the tracker held on 22/22 frames; free-run emitted exactly 31 frames for 31 scans then stopped; looping replay wrapped twice in 8 s; `reset` rewound scan 8 → 0.
-- Live browser (headless Chrome): connected, ~10.5 Hz frames, click → track re-acquires exactly, drag → true_pose (1.20, 0.26) confirmed server-side, cell highlight follows, no console errors.
-- Game headless: full X-win (5 moves) at S=1.0 and S=2.0 through the real two-thread app.
+- `pytest`: **118 passed** (all previous + yaw wrapper angle rotation + background remap + end-to-end tracking through rotated window + settings JSON round-trip + pipeline: sim source comes up, background calibrates, pointer drives simulated hand, full tap flow with own-cell no-op, board-size reconfigure, yaw reconfigure + background remap).
+- Headless UI smoke test (SDL dummy driver): sim source up at 10 Hz / 300 pts, tracking at (1.26, 0.76) conf 1.00, settings screen draws for 2 s then starts on Enter, game phase draws for 2 s then ESC returns to settings, 1 move committed while playing, win overlay renders with team names. ALL SMOKE CHECKS PASSED.
+- Real device probe: 12.05 Hz, 332 pts/rev, 0 bad checksums on `/dev/ttyUSB0` at 115200 baud.
+- Previous verifications still hold: transforms, raycast, noise, sim API/parity, swap surface, tracking accuracy, wire schema, game rules, e2e WS, record/replay round trip, dwell-clock regression, lidar-pointer-mode contract.
 
 ## 9. Gotchas
 

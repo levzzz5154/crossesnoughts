@@ -1,7 +1,7 @@
 """Game state machine tests (plan §14 step 10, §17.11/12)."""
 import pytest
 
-from core.game import GameState, TapDetector, Turn
+from core.game import AppearanceDetector, GameState, TapDetector, Turn
 
 S = 2.0
 
@@ -19,6 +19,18 @@ def test_dwell_tap_and_rifire():
     d.release()
     assert not d.update(*center(0, 0), S, 0.5)  # re-entry resets
     assert d.update(*center(0, 0), S, 0.81)  # re-fire after dwell
+
+
+def test_appearance_detector_fires_only_on_presence_edges():
+    d = AppearanceDetector()
+    assert d.update(*center(0, 0), S, 0.0)
+    assert not d.update(*center(0, 0), S, 0.01)
+    # Moving while present is still the same presence.
+    assert not d.update(*center(2, 2), S, 0.02)
+    # Disappearance rearms, but does not itself fire.
+    d.release()
+    assert not d.update(-0.1, 0.5, S, 0.03)
+    assert d.update(*center(1, 1), S, 0.04)
 
 
 def test_dwell_needs_an_advancing_clock():
@@ -103,6 +115,36 @@ def test_overwrite_any_cell():
     g.tap(*center(1, 1), S)  # X overwrites O's cell — allowed
     assert g.grid[1][1] == Turn.X
     assert g.winner is None
+
+
+def test_own_cell_tap_is_noop():
+    """Re-tapping your OWN glyph: no move, no turn flip, no events."""
+    g = GameState()
+    g.tap(*center(0, 0), S)  # X
+    g.tap(*center(1, 0), S)  # O
+    n_events = len(g.events)
+    assert g.turn == Turn.X
+    assert not g.tap(*center(0, 0), S)  # X re-taps its own cell
+    assert g.turn == Turn.X  # turn NOT wasted
+    assert g.move_count == 2
+    assert g.grid[0][0] == Turn.X
+    assert len(g.events) == n_events  # no tap/overwrite events emitted
+    # the same player can still move elsewhere right after
+    assert g.tap(*center(2, 2), S)
+    assert g.turn == Turn.O
+
+
+def test_own_cell_noop_does_not_block_win():
+    """The no-op can't be abused to stall: play continues normally."""
+    g = GameState()
+    g.tap(*center(0, 0), S)  # X
+    g.tap(*center(1, 0), S)  # O
+    assert not g.tap(*center(0, 0), S)  # X no-op
+    g.tap(*center(0, 1), S)  # X
+    g.tap(*center(1, 1), S)  # O
+    assert not g.tap(*center(0, 1), S)  # X no-op
+    g.tap(*center(0, 2), S)  # X wins the column
+    assert g.winner == Turn.X
 
 
 def test_overwrite_breaks_win_line():

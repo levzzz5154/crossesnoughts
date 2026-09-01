@@ -148,7 +148,8 @@ class SceneModel:
             return False
 
 
-def hello_message(scene: SceneConfig, scan_freq: float) -> str:
+def hello_message(scene: SceneConfig, scan_freq: float,
+                  tracking_mode: str = "advanced") -> str:
     """Server->client hello (once per connect)."""
     return json.dumps(
         {
@@ -166,6 +167,7 @@ def hello_message(scene: SceneConfig, scan_freq: float) -> str:
                 "min_range": SCAN_MIN_RANGE,
                 "max_range": SCAN_MAX_RANGE,
                 "object_radius": scene.object_radius,
+                "tracking_mode": tracking_mode,
             },
         }
     )

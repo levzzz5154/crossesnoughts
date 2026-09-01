@@ -1,5 +1,6 @@
-"""CLI: python -m web.run [--lidar sim|real|replay] [--board-size S] [--port]
-[--seed] [--host] [--record FILE] [--replay-file FILE]
+"""CLI: python -m web.run [--lidar sim|real|replay] [--board-size S]
+[--tracking-mode advanced|simple] [--port] [--seed] [--host] [--record FILE]
+[--replay-file FILE]
 """
 from __future__ import annotations
 
@@ -15,6 +16,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="YDLidar X3 web visualizer")
     p.add_argument("--lidar", choices=["sim", "real", "replay"], default="sim")
     p.add_argument("--board-size", type=float, default=2.0)
+    p.add_argument("--tracking-mode", choices=["advanced", "simple"],
+                   default="advanced",
+                   help="tracker implementation (simple = board area only)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--seed", type=int, default=None)
@@ -50,6 +54,7 @@ def main() -> None:
         replay_speed=args.replay_speed,
         record_path=args.record,
         record_note=args.record_note,
+        tracking_mode=args.tracking_mode,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
