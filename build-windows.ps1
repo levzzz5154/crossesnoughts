@@ -7,6 +7,8 @@ git submodule update --init --recursive
 $Python = (py -3 -c "import sys; print(sys.executable)").Trim()
 if (-not $Python) { throw "Python 3 was not found. Install 64-bit Python 3.11 or 3.12." }
 
+& $Python packaging/patch_ydlidar_cmake.py
+
 Write-Host "Installing Python build dependencies..."
 & $Python -m pip install -r requirements-build.txt
 
