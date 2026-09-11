@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -18,6 +19,10 @@ SETTINGS_FILENAME = "settings.json"
 
 
 def _settings_path() -> Path:
+    if getattr(sys, "frozen", False):
+        # A one-folder portable build keeps its writable configuration beside
+        # the executable, never inside PyInstaller's temporary bundle path.
+        return Path(sys.executable).resolve().parent / SETTINGS_FILENAME
     return Path(__file__).resolve().parent.parent / SETTINGS_FILENAME
 
 

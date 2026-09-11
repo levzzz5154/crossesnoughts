@@ -30,3 +30,20 @@ and Python version as the virtual environment. Place the resulting
 The launcher searches those locations and passes them to game/preview child
 processes. Connect the lidar, select **Real lidar**, and choose or enter its
 `COM` port. The settings screen discovers Windows serial ports automatically.
+
+## Portable ZIP
+
+After building the Windows YDLidar Python extension, run:
+
+```bat
+build-portable.bat
+```
+
+This creates `dist\crosses-noughts-windows-x86_64-lidar.zip`. It contains the
+Python runtime, application, packages, `_ydlidar.pyd`, and detected SDK DLLs;
+the target computer does not need Python installed. Build it on 64-bit Windows
+using the same Python version and architecture used for the SDK extension.
+
+The Linux ZIP is built separately on Linux with `./build-portable.sh`. Native
+Python extensions cannot be shared across operating systems, so distributing
+two platform-labelled ZIPs is intentional.

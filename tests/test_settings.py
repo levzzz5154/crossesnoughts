@@ -1,6 +1,7 @@
 """GameSettings persistence tests: round trip, validation, corrupt file."""
 from pathlib import Path
 
+import core.settings as settings_module
 from core.settings import GameSettings
 
 
@@ -68,3 +69,10 @@ def test_window_size_list_from_json(tmp_path: Path):
     p.write_text('{"window_size": [800, 600]}', encoding="utf-8")
     t = GameSettings.load(p)
     assert t.window_size == (800, 600)
+
+
+def test_frozen_settings_live_beside_executable(monkeypatch, tmp_path: Path):
+    executable = tmp_path / "CrossesNoughts.exe"
+    monkeypatch.setattr(settings_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(settings_module.sys, "executable", str(executable))
+    assert settings_module._settings_path() == tmp_path / "settings.json"

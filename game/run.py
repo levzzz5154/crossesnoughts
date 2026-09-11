@@ -231,9 +231,13 @@ def main() -> None:
                         return
                     settings.save()
                     pipeline.stop()
-                    command = [sys.executable, "-m", "game.run",
-                               "--skip-settings", "--game-window",
-                               "--pointer", args.pointer]
+                    if getattr(sys, "frozen", False):
+                        command = [sys.executable, "--skip-settings",
+                                   "--game-window", "--pointer", args.pointer]
+                    else:
+                        command = [sys.executable, "-m", "game.run",
+                                   "--skip-settings", "--game-window",
+                                   "--pointer", args.pointer]
                     if preview:
                         command.append("--preview")
                     if args.settings_file:

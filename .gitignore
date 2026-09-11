@@ -9,6 +9,8 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+/build/
+/dist/
 
 # Lidar recordings are generated data, re-recordable from hardware.
 # Golden fixtures for regression tests are the exception.

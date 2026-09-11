@@ -41,9 +41,11 @@ class TrackingPreview:
 
     def _layout(self, board_size: float) -> None:
         w, h = self.window.get_size()
-        side = max(180, min(w - 80, h - 190))
+        # Match GameRenderer's final displayed square exactly: gameplay is a
+        # square fitted to the full window and centred on the spare axis.
+        side = max(1, min(w, h))
         self.board_rect = pygame.Rect(
-            (w - side) // 2, 82, side, side,
+            (w - side) // 2, (h - side) // 2, side, side,
         )
 
     def _board_point(self, pos, board_size: float):
@@ -51,8 +53,8 @@ class TrackingPreview:
             return None
         r = self.board_rect
         x = (pos[0] - r.left) / r.width * board_size
-        # Board y grows away from the lidar, so it grows upward on screen.
-        y = (r.bottom - pos[1]) / r.height * board_size
+        # Gameplay maps board Y from top to bottom; preview must be identical.
+        y = (pos[1] - r.top) / r.height * board_size
         return max(0.0, min(board_size, x)), max(0.0, min(board_size, y))
 
     def run(self) -> str:
@@ -87,16 +89,13 @@ class TrackingPreview:
         r = self.board_rect
         return (
             int(r.left + x / max(self._size, 1e-9) * r.width),
-            int(r.bottom - y / max(self._size, 1e-9) * r.height),
+            int(r.top + y / max(self._size, 1e-9) * r.height),
         )
 
     def _draw(self, snap: dict, size: float) -> None:
         self._size = size
         s = self.window
         s.fill(BG)
-        title = self.font.render("Lidar tracking preview", True, TEXT)
-        s.blit(title, (24, 20))
-
         r = self.board_rect
         pygame.draw.rect(s, BOARD, r)
         pygame.draw.rect(s, GRID, r, 2)
@@ -141,10 +140,20 @@ class TrackingPreview:
             x, y, conf = track
             lines.append((f"track: ({x:.3f}, {y:.3f}) m  conf {conf:.2f}",
                           TRACK))
+        # Keep diagnostics as a compact overlay; they must not alter board
+        # geometry or consume layout space on the second monitor.
+        panel = pygame.Surface((min(r.w, 650), 100), pygame.SRCALPHA)
+        panel.fill((10, 14, 18, 205))
+        s.blit(panel, r.topleft)
         for i, (label, col) in enumerate(lines):
-            s.blit(self.small.render(label, True, col), (24, 118 + i * 28))
+            s.blit(self.small.render(label, True, col),
+                   (r.x + 12, r.y + 8 + i * 28))
 
         hint = "Move mouse over board in Sim to move the test point  |  Esc: settings  F: fullscreen"
         text = self.tiny.render(hint, True, DIM)
-        s.blit(text, (24, s.get_height() - text.get_height() - 22))
-
+        hint_bg = pygame.Surface((min(r.w, text.get_width() + 24),
+                                  text.get_height() + 14), pygame.SRCALPHA)
+        hint_bg.fill((10, 14, 18, 205))
+        hint_pos = (r.x, r.bottom - hint_bg.get_height())
+        s.blit(hint_bg, hint_pos)
+        s.blit(text, (hint_pos[0] + 12, hint_pos[1] + 7))
