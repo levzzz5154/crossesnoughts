@@ -1,0 +1,54 @@
+name: Build Windows portable ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-portable:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out application and SDK
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up 64-bit Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+          cache: pip
+
+      - name: Install SWIG
+        shell: powershell
+        run: choco install swig --yes --no-progress
+
+      - name: Build application, YDLidar driver, and ZIP
+        shell: powershell
+        run: .\build-windows.ps1
+
+      - name: Upload downloadable workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosses-noughts-windows-x86_64-lidar
+          path: dist/crosses-noughts-windows-x86_64-lidar.zip
+          if-no-files-found: error
+
+      - name: Attach ZIP to tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          dist/crosses-noughts-windows-x86_64-lidar.zip
+          --generate-notes
+          --title "Crosses & Noughts ${{ github.ref_name }}"

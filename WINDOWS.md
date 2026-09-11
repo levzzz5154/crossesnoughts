@@ -1,5 +1,17 @@
 # Running on Windows
 
+## Easiest option: download and run
+
+Download `crosses-noughts-windows-x86_64-lidar.zip` from the repository's
+GitHub Releases page, extract the complete folder, and double-click
+`CrossesNoughts.exe`. The ZIP includes the application, Python runtime,
+`_ydlidar.pyd`, and the required Windows DLLs. Do not download the Linux
+`.so`; Windows cannot load it.
+
+The GitHub Actions workflow **Build Windows portable ZIP** creates the same
+downloadable package on a Windows build machine. Tagged builds are attached
+to GitHub Releases automatically.
+
 Clone the complete repository and initialize its pinned SDK dependency:
 
 ```powershell
