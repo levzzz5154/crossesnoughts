@@ -110,9 +110,10 @@ class TrackingPreview:
             if 0.0 <= x <= size and 0.0 <= y <= size:
                 pygame.draw.circle(s, POINT, self._to_screen(x, y), 2)
 
-        # Board origin / lidar position.
-        pygame.draw.circle(s, LIDAR, self._to_screen(0.0, 0.0), 6)
-        pygame.draw.circle(s, LIDAR, self._to_screen(0.0, 0.0), 11, 1)
+        # Actual lidar position in aligned board coordinates.
+        lidar = snap.get("lidar_position", (0.0, 0.0))
+        pygame.draw.circle(s, LIDAR, self._to_screen(*lidar), 6)
+        pygame.draw.circle(s, LIDAR, self._to_screen(*lidar), 11, 1)
 
         track = snap.get("track")
         if track is not None:

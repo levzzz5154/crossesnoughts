@@ -8,6 +8,7 @@ hand-edited file cannot poison the pipeline.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -25,6 +26,10 @@ class GameSettings:
     # calibration
     board_size: float = 2.0          # m, square, [BOARD_SIZE_MIN, BOARD_SIZE_MAX]
     board_yaw_deg: float = 0.0       # 0..360, lidar-frame angle of the board window
+    board_offset_x: float = 0.0     # m along yaw-aligned board X
+    board_offset_y: float = 0.0     # m along yaw-aligned board Y
+    tracking_flip_horizontal: bool = False
+    tracking_flip_vertical: bool = False
     # input source: "sim" | "real" | "replay"
     source_kind: str = "sim"
     source_port: str = ""            # real: serial port ("" = default /dev/ttyUSB0)
@@ -48,6 +53,14 @@ class GameSettings:
             min(BOARD_SIZE_MAX, max(BOARD_SIZE_MIN, float(self.board_size)))
         )
         self.board_yaw_deg = float(self.board_yaw_deg % 360.0)
+        for name in ("board_offset_x", "board_offset_y"):
+            try:
+                value = float(getattr(self, name))
+            except (TypeError, ValueError):
+                value = 0.0
+            setattr(self, name, min(1.0, max(0.0, value)) if math.isfinite(value) else 0.0)
+        for name in ("tracking_flip_horizontal", "tracking_flip_vertical"):
+            setattr(self, name, getattr(self, name) is True)
         if self.source_kind not in ("sim", "real", "replay"):
             self.source_kind = "sim"
         if self.tracking_mode not in ("advanced", "simple"):

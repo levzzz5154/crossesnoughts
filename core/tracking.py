@@ -62,6 +62,7 @@ class SimpleTracker:
     EDGE_MARGIN = 0.03  # m; reject the board rim, not the usable board area
 
     def __init__(self, scene: SceneConfig, noise: NoiseConfig):
+        self.alignment = tf.BoardAlignment()
         self.scene = scene
         self.noise = noise
         self._age = 0
@@ -80,7 +81,7 @@ class SimpleTracker:
             return None
 
         angles, ranges = angles[valid], ranges[valid]
-        x, y = tf.polar_to_board(ranges, angles)
+        x, y = self.alignment.to_board(*tf.polar_to_board(ranges, angles), self.scene.board_size)
         margin = min(self.EDGE_MARGIN, self.scene.board_size / 4.0)
         inside = (
             (x >= margin) & (x <= self.scene.board_size - margin) &
@@ -99,6 +100,7 @@ class SimpleTracker:
 
 class Tracker:
     def __init__(self, scene: SceneConfig, noise: NoiseConfig):
+        self.alignment = tf.BoardAlignment()
         self.scene = scene
         self.noise = noise
         self._background: BackgroundTable | None = None
@@ -145,7 +147,7 @@ class Tracker:
             return self._miss_step(now)
 
         # polar -> board
-        xb, yb = tf.polar_to_board(r, a)
+        xb, yb = self.alignment.to_board(*tf.polar_to_board(r, a), self.scene.board_size)
 
         # (3) CLUSTERING on angle adjacency.
         clusters = self._cluster(a, r, xb, yb)
@@ -200,6 +202,7 @@ class Tracker:
         beta = np.arcsin(np.clip(self.scene.object_radius / r_m, 0.0, 1.0))
         r_hat = r_m + self.scene.object_radius * (1.0 + np.cos(beta)) / 2.0
         x, y = tf.polar_to_board(np.array([r_hat]), np.array([theta_m]))
+        x, y = self.alignment.to_board(x, y, self.scene.board_size)
         return float(x[0]), float(y[0]), r_m
 
     def _acquire(self, clusters, now: float) -> TrackResult | None:

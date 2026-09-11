@@ -39,6 +39,7 @@ from core.game import AppearanceDetector, GameState
 from core.lidar_source import make_lidar_source
 from core.scan import LaserScan, SCAN_MIN_RANGE, SCAN_MAX_RANGE
 from core.tracking import SimpleTracker, Tracker
+from core.transforms import BoardAlignment
 from core.yaw import RotatedLidarSource
 
 # A mouse flick that moves the simulated object further than this in one scan
@@ -70,7 +71,10 @@ class Pipeline:
         replay_speed: float = 1.0,
         board_size: float = 2.0,
         tracking_mode: str = "advanced",
+        alignment: BoardAlignment | None = None,
+        board_yaw_deg: float = 0.0,
     ):
+        self.alignment = alignment or BoardAlignment()
         self.scene = SceneConfig(board_size=board_size)
         self.noise = NoiseConfig()
         if tracking_mode not in ("advanced", "simple"):
@@ -91,7 +95,7 @@ class Pipeline:
         self.phase = "settings"  # settings | preview | game (no taps outside game)
 
         self.source_spec: dict = {"kind": None}  # set via configure_source
-        self.board_yaw_deg = 0.0
+        self.board_yaw_deg = board_yaw_deg
 
         # thread boundaries
         self.pointer: dict = {"x": None, "y": None}  # UI -> scan thread
@@ -110,6 +114,11 @@ class Pipeline:
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
+        # A pipeline may be paused while another process owns the lidar (the
+        # separate game window) and resumed afterwards.
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.stop_event.clear()
         self._thread = threading.Thread(target=self._run, name="scan-loop", daemon=True)
         self._thread.start()
 
@@ -118,6 +127,9 @@ class Pipeline:
         self.stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=3.0)
+        self._thread = None
+        self.source = None
+        self.control.clear()
 
     # -- control ops (thread-safe: list append / pop) -------------------------
     def configure_source(
@@ -135,6 +147,9 @@ class Pipeline:
         drag), only update the scene/tracker and publish — skip the sim-source
         rebuild until release fires set_board(rebuild=True)."""
         self.control.append(("set_board", float(size), rebuild))
+
+    def set_alignment(self, alignment: BoardAlignment) -> None:
+        self.control.append(("set_alignment", alignment))
 
     def set_yaw(self, deg: float) -> None:
         self.control.append(("set_yaw", float(deg)))
@@ -165,8 +180,11 @@ class Pipeline:
 
     def _new_tracker(self):
         if self.tracking_mode == "simple":
-            return SimpleTracker(self.scene, self.noise)
-        return Tracker(self.scene, self.noise)
+            tracker = SimpleTracker(self.scene, self.noise)
+        else:
+            tracker = Tracker(self.scene, self.noise)
+        tracker.alignment = self.alignment
+        return tracker
 
     # -- source construction (scan thread only) -------------------------------
     def _build_source(self) -> RotatedLidarSource:
@@ -283,8 +301,9 @@ class Pipeline:
                 mx, my = self.pointer["x"], self.pointer["y"]
             mouse_drives_hand = (self.pointer_mode == "mouse") or (sim is not None)
             if sim is not None and mx is not None:
-                r = math.hypot(mx, my)
-                th = math.atan2(mx, my) + src.yaw
+                ux, uy = self.alignment.from_board(mx, my, self.scene.board_size)
+                r = math.hypot(ux, uy)
+                th = math.atan2(ux, uy) + src.yaw
                 sx, sy = r * math.sin(th), r * math.cos(th)
                 if last_pose is None or (
                     (sx - last_pose[0]) ** 2 + (sy - last_pose[1]) ** 2
@@ -315,8 +334,13 @@ class Pipeline:
                 # pointer ring / cell highlight / tap can never land outside
                 # the board — the tracker can coast past the edge on mixed-
                 # pixel pulls or prediction overshoot.
-                cx = max(0.0, min(self.scene.board_size, res.x))
-                cy = max(0.0, min(self.scene.board_size, res.y))
+                if self.phase == "calibration":
+                    # Guided calibration must see corners even when the old
+                    # board pose is wrong and places them outside its bounds.
+                    cx, cy = res.x, res.y
+                else:
+                    cx = max(0.0, min(self.scene.board_size, res.x))
+                    cy = max(0.0, min(self.scene.board_size, res.y))
                 track = (cx, cy, res.conf)
                 # taps only fire in the game phase
                 if self.phase == "game" and self.pointer_mode == "lidar":
@@ -334,8 +358,9 @@ class Pipeline:
             pts = []
             for p in scan.points[: scan.size]:
                 if SCAN_MIN_RANGE < p.range <= SCAN_MAX_RANGE:
-                    pts.append((p.range * math.sin(p.angle),
-                                p.range * math.cos(p.angle)))
+                    pts.append(self.alignment.to_board(
+                        p.range * math.sin(p.angle), p.range * math.cos(p.angle),
+                        self.scene.board_size))
             with self._frame_lock:
                 self._frame["seq"] += 1
                 self._frame["points"] = pts
@@ -344,6 +369,7 @@ class Pipeline:
                 self._frame["pts_per_scan"] = int(scan.size)
                 self._frame["board_size"] = self.scene.board_size
                 self._frame["yaw_deg"] = self.board_yaw_deg
+                self._frame["lidar_position"] = self.alignment.to_board(0.0, 0.0, self.scene.board_size)
             if getattr(src, "exhausted", False):
                 return
             self.stop_event.wait(0.005)
@@ -396,6 +422,13 @@ class Pipeline:
                         pass
             self._publish(tracking_mode=self.tracking_mode, track=None,
                           bg_ready=(self.tracking_mode == "simple"))
+            return False
+        if cmd == "set_alignment":
+            self.alignment = op[1]
+            self.tracker.alignment = self.alignment
+            self.tracker.reset()
+            self.tap.release()
+            self._publish(track=None, points=[], lidar_position=self.alignment.to_board(0.0, 0.0, self.scene.board_size))
             return False
         if cmd == "set_yaw":
             deg = op[1] % 360.0

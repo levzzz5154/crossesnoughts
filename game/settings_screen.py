@@ -17,11 +17,19 @@ run() returns "start" (Start Game clicked) or "quit" (window closed).
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
+import shutil
+import subprocess
 import threading
+import time
+from collections import deque
 
 import pygame
 
 from core.settings import GameSettings
+from core.transforms import BoardAlignment
+from game.auto_calibration import solve_three_corners, undo_current_transform
 from game.devstatus import X3_BAUDRATE, list_serial_ports, probe
 from game.pipeline import Pipeline, cell_of
 
@@ -36,24 +44,64 @@ WARN = (240, 190, 110)
 ACCENT = (90, 180, 240)
 AMBER = (235, 180, 70)
 
-LEFT_W = 372
+LEFT_W = 420
+
+
+def _fit_label(font, label, width):
+    """Keep text inside its control instead of drawing over neighbours."""
+    if font.size(label)[0] <= width:
+        return label
+    suffix = "..."
+    while label and font.size(label + suffix)[0] > width:
+        label = label[:-1]
+    return label + suffix
 
 
 def pick_file(title: str, filetypes: list[tuple[str, str]]) -> str | None:
-    """System file dialog via tkinter; None if cancelled/unavailable."""
+    """Open a native file chooser without leaving SDL in control of input."""
+    old_grab = pygame.event.get_grab()
+    old_visible = pygame.mouse.get_visible()
     try:
+        pygame.event.set_grab(False)
+        pygame.mouse.set_visible(True)
+        pygame.event.pump()
+
+        # Native desktop dialogs cooperate with SDL focus much more reliably
+        # than a hidden Tk root (notably under KDE/Plasma).
+        desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+        if shutil.which("kdialog") and "KDE" in desktop:
+            filters = "\n".join(
+                f"{patterns}|{label}" for label, patterns in filetypes)
+            result = subprocess.run(
+                ["kdialog", "--title", title, "--getopenfilename",
+                 str(Path.cwd()), filters],
+                capture_output=True, text=True, check=False)
+            return result.stdout.strip() or None
+        if shutil.which("zenity"):
+            command = ["zenity", "--file-selection", f"--title={title}"]
+            command += [f"--file-filter={label} | {patterns}"
+                        for label, patterns in filetypes]
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    check=False)
+            return result.stdout.strip() or None
+
         import tkinter as tk
         from tkinter import filedialog
 
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
+        root.update_idletasks()
         path = filedialog.askopenfilename(parent=root, title=title,
                                           filetypes=filetypes)
         root.destroy()
         return path or None
     except Exception:
         return None
+    finally:
+        pygame.event.set_grab(old_grab)
+        pygame.mouse.set_visible(old_visible)
+        pygame.event.clear((pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP))
 
 
 class Button:
@@ -83,7 +131,8 @@ class Button:
             border, fg = EDGE, TEXT
         pygame.draw.rect(surf, fill, r, border_radius=6)
         pygame.draw.rect(surf, border, r, 1, border_radius=6)
-        text = self.font.render(self.label, True, fg)
+        label = _fit_label(self.font, self.label, max(1, r.w - 12))
+        text = self.font.render(label, True, fg)
         surf.blit(text, text.get_rect(center=r.center))
 
 
@@ -99,6 +148,12 @@ class Slider:
         self.dragging = False
         self.focused = False  # keyboard input active
         self._typing = ""    # buffer for typed digits
+        self._replace_on_type = False
+
+    @property
+    def label_rect(self):
+        """Clickable value field above the slider track."""
+        return pygame.Rect(self.rect.x, self.rect.y - 28, self.rect.w, 25)
 
     def _pos_to_value(self, x) -> float:
         t = (x - self.rect.x) / max(self.rect.w - 1, 1)
@@ -113,10 +168,16 @@ class Slider:
 
     def handle(self, ev) -> None:
         if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
-            if self.rect.inflate(0, 14).collidepoint(ev.pos):
+            if self.label_rect.collidepoint(ev.pos):
+                self.dragging = False
+                self.focused = True
+                self._typing = ""
+                self._replace_on_type = True
+            elif self.rect.inflate(0, 10).collidepoint(ev.pos):
                 self.dragging = True
                 self.focused = True
                 self._typing = ""
+                self._replace_on_type = False
                 v = self._pos_to_value(ev.pos[0])
                 self._commit_value(v)
             else:
@@ -134,11 +195,14 @@ class Slider:
         elif ev.type == pygame.KEYDOWN and self.focused:
             if ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                 self._apply_typing()
-                self.on_release(self.value)
+                self.focused = False
             elif ev.key == pygame.K_ESCAPE:
                 self._typing = ""
+                self._replace_on_type = False
                 self.focused = False
             elif ev.key == pygame.K_BACKSPACE:
+                if self._replace_on_type:
+                    self._replace_on_type = False
                 self._typing = self._typing[:-1]
             elif ev.key in (pygame.K_LEFT, pygame.K_DOWN):
                 v = max(self.vmin, self.value - self.step)
@@ -151,7 +215,11 @@ class Slider:
                 self._commit_value(v)
                 self.on_release(v)
             elif ev.unicode and (ev.unicode.isdigit() or
-                                 (ev.unicode == "." and "." not in self._typing)):
+                                 (ev.unicode == "." and "." not in self._typing) or
+                                 (ev.unicode == "-" and not self._typing and self.vmin < 0)):
+                if self._replace_on_type:
+                    self._typing = ""
+                    self._replace_on_type = False
                 self._typing += ev.unicode
 
     def _apply_typing(self) -> None:
@@ -160,11 +228,11 @@ class Slider:
         try:
             v = float(self._typing)
             v = min(self.vmax, max(self.vmin, v))
-            v = round(round(v / self.step) * self.step, 4)
             self._commit_value(v)
         except ValueError:
             pass
         self._typing = ""
+        self.on_release(self.value)
 
     def draw(self, surf, font) -> None:
         r = self.rect
@@ -178,12 +246,20 @@ class Slider:
         col = AMBER if self.dragging else (ACCENT if not self.focused else (160, 200, 250))
         pygame.draw.circle(surf, col, (hx, cy), 7)
         pygame.draw.circle(surf, TEXT, (hx, cy), 7, 1)
-        if self.focused and self._typing:
-            label = self.fmt(self.value) + "  [" + self._typing + "_]"
+        value_label = self.fmt(self.value)
+        if self.focused:
+            shown = self._typing if self._typing else (
+                "type a value" if self._replace_on_type else value_label)
+            label = shown + "_"
         else:
-            label = self.fmt(self.value)
+            label = value_label
         col_label = AMBER if self.focused else TEXT
-        surf.blit(font.render(label, True, col_label), (r.x, r.y - 24))
+        lr = self.label_rect
+        if self.focused:
+            pygame.draw.rect(surf, PANEL, lr, border_radius=4)
+            pygame.draw.rect(surf, ACCENT, lr, 1, border_radius=4)
+        label = _fit_label(font, label, max(1, lr.w - 6))
+        surf.blit(font.render(label, True, col_label), (lr.x + 3, lr.y + 2))
 
 
 class TextField:
@@ -227,27 +303,35 @@ class TextField:
                          2 if self.active else 1, border_radius=6)
         shown = self.text or placeholder
         col = TEXT if self.text else DIM
-        text = self.font.render(shown[:64], True, col)
+        shown = _fit_label(self.font, shown[:64], max(1, r.w - 20))
+        text = self.font.render(shown, True, col)
+        old_clip = surf.get_clip()
+        surf.set_clip(r)
         surf.blit(text, (r.x + 10, r.y + (r.h - text.get_height()) // 2))
         if self.active and int(_t.time() * 2) % 2 == 0:
-            cx = r.x + 10 + text.get_width() + 2
+            cx = min(r.right - 4, r.x + 10 + text.get_width() + 2)
             pygame.draw.line(surf, TEXT, (cx, r.y + 8), (cx, r.y + r.h - 8), 1)
+        surf.set_clip(old_clip)
 
 
 def _fmt_board(v):
-    return "Board size: {:.2f} m".format(v)
+    return "Board size: {:.3f} m".format(v)
 
 
 def _fmt_yaw(v):
-    return "Window angle: {:.0f} deg".format(v)
+    return "Window angle: {:.1f} deg".format(v)
 
 
 class SettingsScreen:
     def __init__(self, window: pygame.Surface, pipeline: Pipeline,
-                 settings: GameSettings):
+                 settings: GameSettings, on_start=None, on_preview=None,
+                 on_tick=None):
         self.window = window
         self.pipeline = pipeline
         self.settings = settings
+        self.on_start = on_start
+        self.on_preview = on_preview
+        self.on_tick = on_tick
 
         # live copies (persisted via settings.save())
         self.kind = settings.source_kind
@@ -260,34 +344,47 @@ class SettingsScreen:
         self.head = pygame.font.SysFont("dejavusansmono, monospace", 26)
 
         # persistent widgets (rects placed each frame by layout())
-        self.b_sim = Button("Sim", lambda: self._select_source("sim"), self.font)
-        self.b_real = Button("Real lidar", lambda: self._select_source("real"), self.font)
-        self.b_replay = Button("Replay", lambda: self._select_source("replay"), self.font)
+        self.b_sim = Button("Sim", lambda: self._select_source("sim"), self.small)
+        self.b_real = Button("Real lidar", lambda: self._select_source("real"), self.small)
+        self.b_replay = Button("Replay", lambda: self._select_source("replay"), self.small)
         self.b_replayfile = Button("Choose recording...", self._pick_replay, self.small)
         self.b_refresh = Button("Re-scan ports", self.start_probe, self.small)
         self.b_recal = Button("Recalibrate background", self.pipeline.recalibrate, self.small)
+        self.b_auto = Button("AUTO CAL", self._auto_cal_clicked, self.tiny, "selected")
         self.b_simple = Button("Simple", lambda: self._set_tracking_mode("simple"), self.tiny)
         self.b_advanced = Button("Advanced", lambda: self._set_tracking_mode("advanced"), self.tiny)
-        self.b_img_x = Button("X image...", lambda: self._pick_image("X"), self.small)
+        self.b_img_x = Button("Image", lambda: self._pick_image("X"), self.small)
         self.b_clr_x = Button("clear", lambda: self._clear_image("X"), self.tiny)
-        self.b_img_o = Button("O image...", lambda: self._pick_image("O"), self.small)
+        self.b_img_o = Button("Image", lambda: self._pick_image("O"), self.small)
         self.b_clr_o = Button("clear", lambda: self._clear_image("O"), self.tiny)
         self.b_start = Button("START GAME", self._start_clicked, self.head, "primary")
         self.b_preview = Button("PREVIEW", self._preview_clicked, self.small, "selected")
         self.buttons = [self.b_sim, self.b_real, self.b_replay, self.b_replayfile,
-                        self.b_refresh, self.b_recal, self.b_simple, self.b_advanced,
+                        self.b_refresh, self.b_recal, self.b_auto,
+                        self.b_simple, self.b_advanced,
                         self.b_img_x, self.b_clr_x,
                         self.b_img_o, self.b_clr_o, self.b_start, self.b_preview]
 
         self.mode = settings.tracking_mode
 
-        self.s_size = Slider(0.1, 2.0, 0.05, settings.board_size,
+        self.s_size = Slider(0.1, 2.0, 0.01, settings.board_size,
                              self._apply_board, _fmt_board,
                              on_change=self._live_board)
-        self.s_yaw = Slider(0.0, 360.0, 1.0, settings.board_yaw_deg,
+        self.s_yaw = Slider(0.0, 360.0, 0.1, settings.board_yaw_deg,
                             self._apply_yaw, _fmt_yaw,
                             on_change=self._live_yaw)
-        self.sliders = [self.s_size, self.s_yaw]
+        self.s_offset_x = Slider(0.0, 1.0, 0.01, settings.board_offset_x,
+                                 lambda v: self.settings.save(),
+                                 lambda v: f"Offset X: {v:+.3f} m",
+                                 on_change=lambda v: self._offset_changed("x", v))
+        self.s_offset_y = Slider(0.0, 1.0, 0.01, settings.board_offset_y,
+                                 lambda v: self.settings.save(),
+                                 lambda v: f"Offset Y: {v:+.3f} m",
+                                 on_change=lambda v: self._offset_changed("y", v))
+        self.b_flip_h = Button("Flip horizontal", lambda: self._flip_changed("horizontal"), self.tiny)
+        self.b_flip_v = Button("Flip vertical", lambda: self._flip_changed("vertical"), self.tiny)
+        self.buttons += [self.b_flip_h, self.b_flip_v]
+        self.sliders = [self.s_size, self.s_yaw, self.s_offset_x, self.s_offset_y]
 
         self.f_port = TextField(self.port, self._port_changed, self.font)
         self.f_name_x = TextField(settings.team_x_name, self._name_changed("X"),
@@ -308,6 +405,12 @@ class SettingsScreen:
 
         self._start_requested = False
         self._preview_requested = False
+        self._auto_step = -1
+        self._auto_samples = deque(maxlen=45)
+        self._auto_points = []
+        self._auto_status = ""
+        self._auto_stable_since = None
+        self._auto_armed = True
         self.clock = pygame.time.Clock()
 
     # -- thumbnails -----------------------------------------------------------
@@ -358,10 +461,114 @@ class SettingsScreen:
 
     # -- callbacks ---------------------------------------------------------------
     def _start_clicked(self) -> None:
-        self._start_requested = True
+        if self.on_start is None:
+            self._start_requested = True
+        else:
+            for field in self.fields:
+                field.commit()
+            self.pipeline.set_pointer(None, None)
+            self.on_start()
 
     def _preview_clicked(self) -> None:
-        self._preview_requested = True
+        if self.on_preview is None:
+            self._preview_requested = True
+        else:
+            for field in self.fields:
+                field.commit()
+            self.pipeline.set_pointer(None, None)
+            self.on_preview()
+
+    def _alignment_changed(self) -> None:
+        self.pipeline.set_alignment(BoardAlignment(
+            self.settings.board_offset_x, self.settings.board_offset_y,
+            self.settings.tracking_flip_horizontal, self.settings.tracking_flip_vertical))
+
+    def _auto_cal_clicked(self) -> None:
+        if self._auto_step >= 0:
+            self._auto_step = -1
+            self.pipeline.phase = "settings"
+            self._auto_status = "Auto calibration cancelled"
+            return
+        if self.mode != "advanced":
+            self._set_tracking_mode("advanced")
+        self.pipeline.phase = "calibration"
+        self._auto_step = 0
+        self._auto_points = []
+        self._auto_samples.clear()
+        self._auto_stable_since = None
+        self._auto_armed = True
+        self._auto_status = "Hold at FRONT-LEFT corner"
+
+    def _update_auto_calibration(self, snap) -> None:
+        if self._auto_step < 0:
+            return
+        track = snap.get("track")
+        if track is None or track[2] < 0.45:
+            self._auto_samples.clear()
+            self._auto_stable_since = None
+            return
+        alignment = BoardAlignment(
+            self.settings.board_offset_x, self.settings.board_offset_y,
+            self.settings.tracking_flip_horizontal, self.settings.tracking_flip_vertical)
+        point = undo_current_transform(track[:2], self.settings.board_size,
+                                       self.settings.board_yaw_deg, alignment)
+        if self._auto_points and not self._auto_armed:
+            if math.dist(point, self._auto_points[-1]) >= max(.18, self.settings.board_size * .18):
+                self._auto_armed = True
+            else:
+                return
+        self._auto_samples.append(point)
+        if len(self._auto_samples) < 12:
+            return
+        xs, ys = zip(*self._auto_samples)
+        mean = (sum(xs) / len(xs), sum(ys) / len(ys))
+        if max(math.dist(p, mean) for p in self._auto_samples) > .045:
+            self._auto_stable_since = None
+            return
+        now = time.monotonic()
+        if self._auto_stable_since is None:
+            self._auto_stable_since = now
+            return
+        if now - self._auto_stable_since < .65:
+            return
+        self._auto_points.append(mean)
+        self._auto_step += 1
+        self._auto_samples.clear()
+        self._auto_stable_since = None
+        self._auto_armed = False
+        labels = ("BACK-LEFT", "BACK-RIGHT")
+        if self._auto_step < 3:
+            self._auto_status = f"Captured. Move to {labels[self._auto_step - 1]} corner"
+            return
+        try:
+            size, yaw, ox, oy = solve_three_corners(*self._auto_points)
+            if not (0.1 <= size <= 2.0 and 0.0 <= ox <= 1.0 and 0.0 <= oy <= 1.0):
+                raise ValueError("solved size or offset is outside supported limits")
+            self.settings.board_size = self.s_size.value = size
+            self.settings.board_yaw_deg = self.s_yaw.value = yaw
+            self.settings.board_offset_x = self.s_offset_x.value = ox
+            self.settings.board_offset_y = self.s_offset_y.value = oy
+            self.settings.tracking_flip_horizontal = False
+            self.settings.tracking_flip_vertical = False
+            self.settings.save()
+            self.pipeline.set_board(size, rebuild=True)
+            self.pipeline.set_yaw(yaw)
+            self._alignment_changed()
+            self._auto_status = f"Complete: {size:.2f} m, yaw {yaw:.0f} deg"
+        except ValueError as exc:
+            self._auto_status = f"Failed: {exc}. Try again"
+        self._auto_step = -1
+        self.pipeline.phase = "settings"
+
+    def _offset_changed(self, axis, value) -> None:
+        setattr(self.settings, "board_offset_" + axis, value)
+        self._alignment_changed()
+
+    def _flip_changed(self, axis) -> None:
+        name = "tracking_flip_" + axis
+        setattr(self.settings, name, not getattr(self.settings, name))
+        self.settings.save()
+        self._alignment_changed()
 
     def _set_tracking_mode(self, mode: str) -> None:
         self.mode = mode
@@ -463,7 +670,7 @@ class SettingsScreen:
         self.b_sim.rect = pygame.Rect(lx, y, bw, 40)
         self.b_real.rect = pygame.Rect(lx + bw + 8, y, bw, 40)
         self.b_replay.rect = pygame.Rect(lx + 2 * (bw + 8), y, bw, 40)
-        y += 52
+        y += 64
         self.f_port.rect = pygame.Rect(lx, y, left_w, 34)
         L["port_label_y"] = y - 18
         y += 44
@@ -474,18 +681,26 @@ class SettingsScreen:
         L["dev_box"] = pygame.Rect(lx, y, left_w, 124)
         y += 136
         L["cal_head"] = pygame.Rect(lx, y, left_w, 24)
-        y += 34
+        y += 48
         self.s_size.rect = pygame.Rect(lx, y, left_w, 18)
         y += 54
         self.s_yaw.rect = pygame.Rect(lx, y, left_w, 18)
         y += 54
-        self.b_recal.rect = pygame.Rect(lx, y, left_w * 0.44, 36)
-        self.b_simple.rect = pygame.Rect(lx + left_w * 0.48, y,
-                                         left_w * 0.22, 36)
-        self.b_advanced.rect = pygame.Rect(lx + left_w * 0.74, y,
-                                           left_w * 0.26, 36)
-        self.b_recal.label = ("Recalibrate background" if self.mode == "advanced"
-                              else "No calibration needed")
+        self.s_offset_x.rect = pygame.Rect(lx, y, left_w, 18)
+        y += 46
+        self.s_offset_y.rect = pygame.Rect(lx, y, left_w, 18)
+        y += 40
+        self.b_flip_h.rect = pygame.Rect(lx, y, left_w * 0.47, 34)
+        self.b_flip_v.rect = pygame.Rect(lx + left_w * 0.53, y, left_w * 0.47, 34)
+        y += 46
+        self.b_flip_h.style = "selected" if self.settings.tracking_flip_horizontal else "default"
+        self.b_flip_v.style = "selected" if self.settings.tracking_flip_vertical else "default"
+        button_w = (left_w - 18) / 4
+        self.b_recal.rect = pygame.Rect(lx, y, button_w, 36)
+        self.b_auto.rect = pygame.Rect(lx + button_w + 6, y, button_w, 36)
+        self.b_simple.rect = pygame.Rect(lx + 2 * (button_w + 6), y, button_w, 36)
+        self.b_advanced.rect = pygame.Rect(lx + 3 * (button_w + 6), y, button_w, 36)
+        self.b_recal.label = "BG CAL" if self.mode == "advanced" else "BG N/A"
         L["hint"] = (lx, y + 44)
         y += 90
         L["team_head"] = pygame.Rect(lx, y, left_w, 24)
@@ -528,14 +743,18 @@ class SettingsScreen:
         self.pipeline.set_pointer(None, None)
 
     def _ppm(self, r: pygame.Rect, snap: dict) -> float:
-        scale_m = max(snap.get("board_size", 2.0) * 1.8, 3.2)
+        lidar = snap.get("lidar_position", (0.0, 0.0))
+        scale_m = max(snap.get("board_size", 2.0) * 1.8, 3.2, abs(lidar[0]) + 1, abs(lidar[1]) + 1)
         return (r.w / 2 - 16) / scale_m
 
     # -- main loop -----------------------------------------------------------------
     def run(self) -> str:
         while True:
+            if self.on_tick is not None:
+                self.on_tick()
             L = self.layout()
             snap = self.pipeline.snapshot()
+            self._update_auto_calibration(snap)
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
                     self.pipeline.set_pointer(None, None)
@@ -544,8 +763,10 @@ class SettingsScreen:
                     if ev.key == pygame.K_RETURN and not any(
                             f.active for f in self.fields) and \
                             not any(s.focused for s in self.sliders):
-                        self.pipeline.set_pointer(None, None)
-                        return "start"
+                        if self.on_start is None:
+                            self.pipeline.set_pointer(None, None)
+                            return "start"
+                        self._start_clicked()
                 for b in self.buttons:
                     b.handle(ev)
                 for s in self.sliders:
@@ -582,7 +803,7 @@ class SettingsScreen:
         for b in self.buttons:
             b.draw(surf)
         for s in self.sliders:
-            s.draw(surf, self.small)
+            s.draw(surf, self.tiny if s in (self.s_offset_x, self.s_offset_y) else self.small)
         for f in self.fields:
             f.draw(surf)
         self._draw_radar(L, snap)
@@ -658,12 +879,15 @@ class SettingsScreen:
         s = self.window
         s.blit(self.small.render("CALIBRATION", True, ACCENT),
                L["cal_head"].topleft)
-        mode_hint = ("simple = board area only; no background calibration"
-                     if self.mode == "simple" else
-                     "advanced = calibrated background + filtered tracking")
         s.blit(self.tiny.render(
-            "drag sliders or click+type | " + mode_hint,
+            "Offsets: board axes, metres",
             True, DIM), L["hint"])
+        s.blit(self.tiny.render("Flips: around board center", True, DIM),
+               (L["hint"][0], L["hint"][1] + 20))
+        if self._auto_status:
+            s.blit(self.tiny.render(self._auto_status[:48], True,
+                                    GOOD if self._auto_status.startswith(("Complete", "Captured")) else WARN),
+                   (L["hint"][0], L["hint"][1] + 40))
 
     def _draw_teams(self, L) -> None:
         s = self.window
@@ -689,16 +913,22 @@ class SettingsScreen:
         ppm = self._ppm(r, snap)
         size = snap.get("board_size", 2.0)
 
+        lx, ly = snap.get("lidar_position", (0.0, 0.0))
+        lidar_center = (int(cx + lx * ppm), int(cy - ly * ppm))
+
         # range rings (1 m steps) + axes
         radius = r.w / 2 - 16
         scale_m = radius / ppm
         ring = 1.0
+        old_clip = s.get_clip()
+        s.set_clip(r)
         while ring < scale_m:
             rad = ring * ppm
-            pygame.draw.circle(s, (36, 42, 52), (int(cx), int(cy)), int(rad), 1)
+            pygame.draw.circle(s, (36, 42, 52), lidar_center, int(rad), 1)
             lab = self.tiny.render(f"{ring:.0f}m", True, (85, 95, 110))
-            s.blit(lab, (cx + 4, cy - rad + 2))
+            s.blit(lab, (lidar_center[0] + 4, lidar_center[1] - rad + 2))
             ring += 1.0
+        s.set_clip(old_clip)
         pygame.draw.line(s, (50, 58, 70), (r.x + 8, cy), (r.right - 8, cy), 1)
         pygame.draw.line(s, (50, 58, 70), (cx, r.y + 8), (cx, r.bottom - 8), 1)
 
@@ -736,7 +966,7 @@ class SettingsScreen:
             if 0 <= x <= size and 0 <= y <= size:
                 cxx, cyy = cell_of(x, y, size)
                 cell = pygame.Rect(int(cx + cxx * S / 3.0),
-                                   int(cy - S + cyy * S / 3.0),
+                                   int(cy - (cyy + 1) * S / 3.0),
                                    int(S / 3.0), int(S / 3.0))
                 overlay = pygame.Surface(cell.size, pygame.SRCALPHA)
                 overlay.fill((255, 255, 255, 36))
@@ -747,8 +977,8 @@ class SettingsScreen:
             pygame.draw.circle(s, col, (int(px), int(py)), 2)
 
         # lidar marker
-        pygame.draw.circle(s, (255, 160, 60), (int(cx), int(cy)), 5)
-        pygame.draw.circle(s, (255, 160, 60), (int(cx), int(cy)), 9, 1)
+        pygame.draw.circle(s, (255, 160, 60), lidar_center, 5)
+        pygame.draw.circle(s, (255, 160, 60), lidar_center, 9, 1)
 
         # radar HUD
         hz = snap.get("hz") or 0.0

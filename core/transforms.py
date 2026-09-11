@@ -17,6 +17,8 @@ L->B is the identity swap (no sign flip): x_B = y_L, y_B = x_L.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from core.config import SceneConfig
@@ -49,3 +51,22 @@ def world_to_board(x_w: np.ndarray, z_w: np.ndarray, s: float) -> tuple[np.ndarr
 def ray_dir_board(theta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Ray direction in BOARD frame for angle theta: d_B = (sin theta, cos theta)."""
     return np.sin(theta), np.cos(theta)
+
+@dataclass(frozen=True)
+class BoardAlignment:
+    """Board origin in yaw-aligned lidar axes (metres), then center mirrors."""
+
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+    flip_horizontal: bool = False
+    flip_vertical: bool = False
+
+    def to_board(self, x, y, size):
+        x, y = x - self.offset_x, y - self.offset_y
+        return (size - x if self.flip_horizontal else x,
+                size - y if self.flip_vertical else y)
+
+    def from_board(self, x, y, size):
+        x = size - x if self.flip_horizontal else x
+        y = size - y if self.flip_vertical else y
+        return x + self.offset_x, y + self.offset_y

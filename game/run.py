@@ -20,10 +20,13 @@ Pointer source (--pointer, default lidar):
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 
 import pygame
 
 from core.settings import GameSettings
+from core.transforms import BoardAlignment
 from game.pipeline import Pipeline, cell_of
 
 
@@ -46,6 +49,7 @@ def parse_args() -> argparse.Namespace:
                    help="open the board-only tracking preview instead of the game")
     p.add_argument("--skip-settings", action="store_true",
                    help="start in the game phase directly")
+    p.add_argument("--game-window", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--settings-file", default=None, metavar="FILE",
                    help="alternative settings.json path (default: repo root)")
     rec = p.add_argument_group("record / replay")
@@ -189,7 +193,11 @@ def main() -> None:
                         replay_loop=args.replay_loop,
                         replay_speed=args.replay_speed,
                         board_size=settings.board_size,
-                        tracking_mode=settings.tracking_mode)
+                        tracking_mode=settings.tracking_mode,
+                        board_yaw_deg=settings.board_yaw_deg,
+                        alignment=BoardAlignment(settings.board_offset_x, settings.board_offset_y,
+                                                 settings.tracking_flip_horizontal,
+                                                 settings.tracking_flip_vertical))
     pipeline.configure_source(
         settings.source_kind, port=settings.source_port or None,
         replay_file=settings.replay_file or None, seed=settings.seed)
@@ -206,8 +214,52 @@ def main() -> None:
     try:
         while True:
             if phase == "settings":
-                screen = SettingsScreen(window, pipeline, settings)
+                child_process = None
+
+                def resume_settings_pipeline():
+                    pipeline.phase = "settings"
+                    pipeline.configure_source(
+                        settings.source_kind,
+                        port=settings.source_port or None,
+                        replay_file=settings.replay_file or None,
+                        seed=settings.seed)
+                    pipeline.start()
+
+                def launch_window(preview=False):
+                    nonlocal child_process
+                    if child_process is not None and child_process.poll() is None:
+                        return
+                    settings.save()
+                    pipeline.stop()
+                    command = [sys.executable, "-m", "game.run",
+                               "--skip-settings", "--game-window",
+                               "--pointer", args.pointer]
+                    if preview:
+                        command.append("--preview")
+                    if args.settings_file:
+                        command += ["--settings-file", args.settings_file]
+                    child_process = subprocess.Popen(command)
+
+                def launch_game_window():
+                    launch_window(preview=False)
+
+                def launch_preview_window():
+                    launch_window(preview=True)
+
+                def poll_child_window():
+                    nonlocal child_process
+                    if child_process is not None and child_process.poll() is not None:
+                        child_process = None
+                        resume_settings_pipeline()
+
+                screen = SettingsScreen(window, pipeline, settings,
+                                        on_start=launch_game_window,
+                                        on_preview=launch_preview_window,
+                                        on_tick=poll_child_window)
                 result = screen.run()
+                if child_process is not None and child_process.poll() is None:
+                    child_process.terminate()
+                    child_process.wait(timeout=3)
                 if result == "quit":
                     break
                 if result == "preview":
@@ -219,12 +271,16 @@ def main() -> None:
                     pipeline.new_game()
             elif phase == "preview":
                 result = tracking_preview_phase(window, pipeline, settings)
+                if args.game_window:
+                    break
                 if result == "quit":
                     break
                 phase = "settings"
                 pipeline.phase = "settings"
             else:
                 result = game_phase(window, pipeline, settings)
+                if args.game_window:
+                    break
                 if result == "quit":
                     break
                 phase = "settings"
