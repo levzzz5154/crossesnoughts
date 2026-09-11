@@ -1,5 +1,12 @@
 # Running on Windows
 
+Clone the complete repository and initialize its pinned SDK dependency:
+
+```powershell
+git clone --recurse-submodules https://github.com/levzzz5154/crossesnoughts.git
+cd crossesnoughts
+```
+
 ## Simulation and replay
 
 1. Install 64-bit Python 3.11 or 3.12.
@@ -33,13 +40,15 @@ processes. Connect the lidar, select **Real lidar**, and choose or enter its
 
 ## Portable ZIP
 
-After building the Windows YDLidar Python extension, run:
+Install 64-bit Visual Studio Build Tools with **Desktop development with
+C++**, CMake, SWIG, Git, and 64-bit Python 3.11 or 3.12. Then run:
 
 ```bat
 build-portable.bat
 ```
 
-This creates `dist\crosses-noughts-windows-x86_64-lidar.zip`. It contains the
+The script initializes the SDK submodule, builds its Windows Python extension,
+and creates `dist\crosses-noughts-windows-x86_64-lidar.zip`. It contains the
 Python runtime, application, packages, `_ydlidar.pyd`, and detected SDK DLLs;
 the target computer does not need Python installed. Build it on 64-bit Windows
 using the same Python version and architecture used for the SDK extension.
