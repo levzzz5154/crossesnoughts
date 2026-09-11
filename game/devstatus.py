@@ -1,8 +1,7 @@
 """Serial device detection + live probe for the settings screen.
 
-Standard library only (termios + select) — no ydlidar SDK needed, so device
-status works even when the SWIG module is missing or built for another
-interpreter. The triangle-protocol parsing is the same verified logic as
+Uses PySerial, so device status works on Linux, Windows, and macOS without
+loading the YDLidar SDK. The triangle-protocol parsing is the same logic as
 tools/lidar_check.py:
 
     packet = AA 55 | ct | count | firstAngle:u16 | lastAngle:u16 | cs:u16 | u16[count]
@@ -16,11 +15,10 @@ result dict) and always closes the port.
 """
 from __future__ import annotations
 
-import glob
-import os
-import select
-import termios
 import time
+
+import serial
+from serial.tools import list_ports
 
 TRI_PACKHEADSIZE = 10
 TRI_PACKMAXNODES = 80
@@ -30,48 +28,25 @@ X3_BAUDRATE = 115200
 def list_serial_ports() -> list[dict]:
     """Candidate serial devices, most-likely-lidar first.
 
-    Prefers stable /dev/serial/by-id symlinks (survive replug order) over
-    raw /dev/ttyUSB* names. Each entry: path, kind, exists, readable.
+    Each entry: path, kind, exists, readable, and description.
     """
-    seen: set[str] = set()
     out: list[dict] = []
-    for pat, kind in (
-        ("/dev/serial/by-id/*", "by-id"),
-        ("/dev/ttyUSB*", "usb"),
-        ("/dev/ttyACM*", "usb"),
-    ):
-        for path in sorted(glob.glob(pat)):
-            real = os.path.realpath(path)
-            if real in seen:
-                continue
-            seen.add(real)
-            exists = os.path.exists(path)
-            readable = False
-            if exists:
-                try:
-                    readable = os.access(path, os.R_OK | os.W_OK)
-                except OSError:
-                    readable = False
-            out.append({"path": path, "kind": kind, "exists": exists,
-                        "readable": readable})
+    ports = list(list_ports.comports())
+    ports.sort(key=lambda item: (
+        not (item.vid is not None or "USB" in (item.description or "").upper()),
+        item.device))
+    for info in ports:
+        description = info.description or ""
+        kind = "usb" if info.vid is not None or "USB" in description.upper() else "serial"
+        out.append({"path": info.device, "kind": kind, "exists": True,
+                    "readable": True, "description": description})
     return out
 
 
-def open_port(port: str, baud: int) -> int:
-    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    attrs = termios.tcgetattr(fd)
-    attrs[0] = 0  # iflag
-    attrs[1] = 0  # oflag
-    attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # cflag
-    attrs[3] = 0  # lflag
-    speed = getattr(termios, f"B{baud}", None)
-    if speed is None:
-        os.close(fd)
-        raise ValueError(f"unsupported baud {baud}")
-    attrs[4] = attrs[5] = speed
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    termios.tcflush(fd, termios.TCIOFLUSH)
-    return fd
+def open_port(port: str, baud: int):
+    return serial.Serial(port=port, baudrate=baud, bytesize=serial.EIGHTBITS,
+                         parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
+                         timeout=0.05)
 
 
 def parse(buf: bytes):
@@ -109,14 +84,14 @@ def parse(buf: bytes):
 def probe(port: str, baud: int = X3_BAUDRATE, seconds: float = 1.5) -> dict:
     """Sniff `port` for `seconds` and report whether a lidar is streaming.
 
-    Never raises: any failure lands in result["error"]. Always closes the fd.
+    Never raises: any failure lands in result["error"]. Always closes the port.
     """
     res: dict = {"port": port, "baud": baud, "ok": False, "error": None,
                  "packets": 0, "bad": 0, "points": 0, "pts_per_sec": 0.0,
                  "hz": None, "points_per_rev": None}
-    fd = None
+    connection = None
     try:
-        fd = open_port(port, baud)
+        connection = open_port(port, baud)
         buf = bytearray()
         good = bad = pts = 0
         revs: list[tuple[int, float]] = []  # (points, duration)
@@ -125,10 +100,11 @@ def probe(port: str, baud: int = X3_BAUDRATE, seconds: float = 1.5) -> dict:
         started = False
         t0 = time.time()
         while time.time() - t0 < seconds:
-            r, _, _ = select.select([fd], [], [], 0.05)
-            if not r:
+            waiting = connection.in_waiting
+            if not waiting:
+                time.sleep(0.01)
                 continue
-            buf += os.read(fd, 65536)
+            buf += connection.read(min(waiting, 65536))
             pkts, used, nbad = parse(bytes(buf))
             del buf[:used]
             bad += nbad
@@ -171,8 +147,8 @@ def probe(port: str, baud: int = X3_BAUDRATE, seconds: float = 1.5) -> dict:
         res["error"] = f"{type(e).__name__}: {e}"
         return res
     finally:
-        if fd is not None:
+        if connection is not None:
             try:
-                os.close(fd)
-            except OSError:
+                connection.close()
+            except (OSError, serial.SerialException):
                 pass

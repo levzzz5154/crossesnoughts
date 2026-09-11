@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Launch Crosses & Noughts (YDLidar X3).
 #
-# Handles the two things that are easy to forget:
-#   * the miniconda python (system python 3.14 segfaults in the lidar SDK)
-#   * PYTHONPATH for the SWIG module, needed by real-lidar mode
+# Prefers the known-good local Python, but also works with PYTHON=/path/to/python
+# or the first python3/python on PATH. run.py locates a locally built SDK.
 #
 # Extra flags pass straight through:
 #   ./run.sh                                  settings screen, then play
@@ -12,14 +11,19 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="/home/levzzz/miniconda3/bin/python"
+DEFAULT_PY="/home/levzzz/miniconda3/bin/python"
+if [ -n "${PYTHON:-}" ]; then
+    PY="$PYTHON"
+elif [ -x "$DEFAULT_PY" ]; then
+    PY="$DEFAULT_PY"
+else
+    PY="$(command -v python3 || command -v python)"
+fi
 
 if [ ! -x "$PY" ]; then
-    echo "miniconda python not found at $PY" >&2
+    echo "Python interpreter not found: $PY" >&2
     exit 1
 fi
 
-export PYTHONPATH="$REPO/YDLidar-SDK/build/python${PYTHONPATH:+:$PYTHONPATH}"
-
 cd "$REPO"
-exec "$PY" -m game.run "$@"
+exec "$PY" run.py "$@"

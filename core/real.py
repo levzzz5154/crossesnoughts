@@ -7,6 +7,7 @@ applied in initialize() — without it the SDK initializes at its default
 """
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -107,7 +108,7 @@ class RealLidarSource(LidarSource):
     ):
         self.scene = scene
         self.noise = noise
-        self.port = port or "/dev/ttyUSB0"
+        self.port = port or ("COM3" if os.name == "nt" else "/dev/ttyUSB0")
         self.n_avg = n_avg
         self._ydlidar = None
         self._laser = None

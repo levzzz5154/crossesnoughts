@@ -455,6 +455,11 @@ class SettingsScreen:
             self.probing = False
             if res.get("ok") and not self.port and target:
                 self.port = target
+                self.settings.source_port = target
+                self.settings.save()
+                if self.kind == "real":
+                    self.pipeline.configure_source("real", port=target,
+                                                   seed=self.settings.seed)
 
         self._probe_thread = threading.Thread(target=work, daemon=True)
         self._probe_thread.start()
