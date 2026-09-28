@@ -1,8 +1,7 @@
 """Serial device detection + live probe for the settings screen.
 
 Uses PySerial, so device status works on Linux, Windows, and macOS without
-loading the YDLidar SDK. The triangle-protocol parsing is the same logic as
-tools/lidar_check.py:
+loading the YDLidar SDK. Packets are parsed by core.x3_protocol:
 
     packet = AA 55 | ct | count | firstAngle:u16 | lastAngle:u16 | cs:u16 | u16[count]
     angle  = (raw >> 1) / 64.0   degrees  (CYdLidar.cpp:659)
@@ -19,9 +18,8 @@ import time
 
 import serial
 from serial.tools import list_ports
+from core.x3_protocol import parse
 
-TRI_PACKHEADSIZE = 10
-TRI_PACKMAXNODES = 80
 X3_BAUDRATE = 115200
 
 
@@ -47,38 +45,6 @@ def open_port(port: str, baud: int):
     return serial.Serial(port=port, baudrate=baud, bytesize=serial.EIGHTBITS,
                          parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE,
                          timeout=0.05)
-
-
-def parse(buf: bytes):
-    """Yield (ct, first_deg, last_deg, ranges_m); return (consumed, bad_cs)."""
-    out, i, n, bad = [], 0, len(buf), 0
-    while True:
-        j = buf.find(b"\xaa\x55", i)
-        if j < 0:
-            return out, n, bad
-        if j + TRI_PACKHEADSIZE > n:
-            return out, j, bad
-        count = buf[j + 3]
-        if count == 0 or count > TRI_PACKMAXNODES:
-            i = j + 1
-            continue
-        need = TRI_PACKHEADSIZE + count * 2
-        if j + need > n:
-            return out, j, bad
-        pkt = buf[j:j + need]
-        w = [pkt[k] | (pkt[k + 1] << 8) for k in range(0, need, 2)]
-        ccs = 0
-        for x in w[:4]:
-            ccs ^= x
-        for x in w[5:5 + count]:
-            ccs ^= x
-        if ccs != w[4]:
-            bad += 1
-            i = j + 1
-            continue
-        out.append((pkt[2], (w[2] >> 1) / 64.0, (w[3] >> 1) / 64.0,
-                    [x / 4000.0 for x in w[5:5 + count]]))
-        i = j + need
 
 
 def probe(port: str, baud: int = X3_BAUDRATE, seconds: float = 1.5) -> dict:

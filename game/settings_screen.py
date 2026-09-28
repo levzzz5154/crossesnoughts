@@ -2,7 +2,8 @@
 
 Sections (left column):
   - INPUT SOURCE: Sim / Real lidar / Replay picker with live device detection
-    (a stdlib serial probe - no SDK needed) and live pipeline stats.
+    (a pyserial sniff on POSIX; port enumeration only on Windows, where COM
+    ports are exclusive) and live pipeline stats.
   - CALIBRATION: board size + window-angle sliders, live 360-degree radar
     view with the rotated board quadrant overlaid, background recalibration,
     and a tracking check (tracked position, confidence, cell).
@@ -32,6 +33,10 @@ from core.transforms import BoardAlignment
 from game.auto_calibration import solve_three_corners, undo_current_transform
 from game.devstatus import X3_BAUDRATE, list_serial_ports, probe
 from game.pipeline import Pipeline, cell_of
+
+# Windows COM ports are exclusive: sniffing a port would race the pipeline's
+# own open (initialize/turnOn, reconnects) and can toggle the motor DTR.
+EXCLUSIVE_PORTS = os.name == "nt"
 
 BG = (16, 19, 24)
 PANEL = (24, 28, 35)
@@ -425,6 +430,14 @@ class SettingsScreen:
 
     # -- device probe -----------------------------------------------------------
     def start_probe(self) -> None:
+        if EXCLUSIVE_PORTS:
+            # The scan thread is the sole serial-port owner; only list ports.
+            self.ports = list_serial_ports()
+            self.probing = False
+            self.probe_result = None
+            if not self.port and self.ports:
+                self._adopt_port(self.ports[0]["path"])
+            return
         # probing the port the pipeline is already streaming from would
         # steal its bytes - report from the live pipeline instead
         snap = self.pipeline.snapshot()
@@ -442,9 +455,7 @@ class SettingsScreen:
         def work():
             ports = list_serial_ports()
             self.ports = ports
-            target = self.port or next(
-                (p["path"] for p in ports if p["kind"] == "by-id"),
-                ports[0]["path"] if ports else None)
+            target = self.port or (ports[0]["path"] if ports else None)
             if target:
                 res = probe(target, X3_BAUDRATE, 1.5)
             else:
@@ -454,15 +465,21 @@ class SettingsScreen:
             self.probe_result = res
             self.probing = False
             if res.get("ok") and not self.port and target:
-                self.port = target
-                self.settings.source_port = target
-                self.settings.save()
-                if self.kind == "real":
-                    self.pipeline.configure_source("real", port=target,
-                                                   seed=self.settings.seed)
+                self._adopt_port(target)
 
         self._probe_thread = threading.Thread(target=work, daemon=True)
         self._probe_thread.start()
+
+    def _adopt_port(self, port: str) -> None:
+        """Select an auto-detected port as if the user had typed it."""
+        self.port = port
+        self.f_port.text = port
+        self.f_port.commit()
+        self.settings.source_port = port
+        self.settings.save()
+        if self.kind == "real":
+            self.pipeline.configure_source("real", port=port,
+                                           seed=self.settings.seed)
 
     # -- callbacks ---------------------------------------------------------------
     def _start_clicked(self) -> None:
@@ -830,13 +847,27 @@ class SettingsScreen:
         box = L["dev_box"]
         pygame.draw.rect(s, PANEL, box, border_radius=8)
         pygame.draw.rect(s, EDGE, box, 1, border_radius=8)
-        for i, (text, col) in enumerate(self._status_lines(snap)):
-            s.blit(self.tiny.render(text[:58], True, col),
-                   (box.x + 10, box.y + 8 + i * 20))
+        y = box.y + 8
+        for text, col in self._status_lines(snap):
+            # Wrap by rendered width: SDK errors must stay inside the panel
+            # and their useful detail should not be cut at a fixed 58 chars.
+            while text and y + self.tiny.get_height() <= box.bottom - 8:
+                end = len(text)
+                while end > 1 and self.tiny.size(text[:end])[0] > box.w - 20:
+                    end -= 1
+                if end < len(text):
+                    space = text.rfind(" ", 0, end + 1)
+                    if space > 0:
+                        end = space
+                s.blit(self.tiny.render(text[:end], True, col), (box.x + 10, y))
+                text = text[end:].lstrip()
+                y += 20
 
     def _status_lines(self, snap: dict) -> list[tuple[str, tuple]]:
         lines: list[tuple[str, tuple]] = []
-        if self.probing:
+        if self.kind == "real" and snap.get("source_ok"):
+            lines.append((f"lidar connected: {self.port}", GOOD))
+        elif self.probing:
             lines.append(("probing serial ports...", DIM))
         elif self.probe_result is not None:
             if self.probe_result.get("ok"):
@@ -851,7 +882,9 @@ class SettingsScreen:
             else:
                 err = self.probe_result.get("error") or "not streaming"
                 lines.append((f"no lidar on serial ports ({err})", WARN))
-        elif not self.ports:
+        elif self.ports:
+            lines.append((f"serial port found: {self.port or self.ports[0]['path']}", DIM))
+        else:
             lines.append(("no serial devices found", WARN))
         if snap.get("source_ok"):
             hz = snap.get("hz") or 0.0

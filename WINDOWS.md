@@ -36,6 +36,14 @@ simulation, and replay mode do not require the YDLidar native SDK.
 
 ## Real YDLidar X3
 
+Windows source runs use PySerial to read X3 packets directly at 115200 baud.
+No native SDK is required for the X3: run `run.bat --lidar real --port-dev COM8`
+after installing the application requirements. Startup is confirmed only when
+a full revolution with valid packet checksums arrives. The angle correction,
+variable point counts, recording, and background calibration are preserved.
+
+The native SDK build below is retained for older portable bundles and SDK work.
+
 The checked-in `_ydlidar.so` is a Linux binary and cannot load on Windows.
 Build the bundled `YDLidar-SDK` with 64-bit Visual Studio, CMake, Python, and
 SWIG, ensuring that the Python extension and DLLs use the same architecture
@@ -49,6 +57,13 @@ and Python version as the virtual environment. Place the resulting
 The launcher searches those locations and passes them to game/preview child
 processes. Connect the lidar, select **Real lidar**, and choose or enter its
 `COM` port. The settings screen discovers Windows serial ports automatically.
+
+Port discovery only lists devices; it does not mean the lidar has connected.
+Only the scan pipeline opens the serial port. The settings panel reports the
+SDK's connection/startup error and displays **lidar connected** once startup
+succeeds. If access is denied, close other copies of CrossesNoughts and any
+serial monitor or vendor utility using that COM port. Re-scan ports safely
+refreshes the list without opening or resetting the device.
 
 ## Portable ZIP
 

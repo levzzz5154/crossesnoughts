@@ -41,7 +41,7 @@ def pipeline():
 
 def test_sim_source_comes_up(pipeline):
     snap = wait_for(pipeline,
-                    lambda s: s["source_ok"] and s["bg_ready"],
+                    lambda s: s["source_ok"] and s["bg_ready"] and s["seq"] > 0,
                     what="sim source up + calibrated")
     assert snap["source_error"] is None
     assert snap["hz"] == pytest.approx(10.0, abs=0.5)
@@ -156,3 +156,44 @@ def test_new_game_clears(pipeline):
     pipeline.new_game()
     wait_game(pipeline, lambda g: g.move_count == 0 and g.winner is None
               and g.turn is Turn.X, what="new game reset")
+
+
+def test_scan_loop_exception_reconnects_instead_of_killing_thread():
+    """A lost device (serial exception mid-stream) must be reported and
+    re-initialized; the scan thread has to survive it."""
+    import threading
+
+    class Flaky:
+        def __init__(self):
+            self.inits = 0
+            self.reads = 0
+
+        def initialize(self):
+            self.inits += 1
+            return True
+
+        def turnOn(self):
+            return True
+
+        def doProcessSimple(self, scan):
+            self.reads += 1
+            if self.reads == 1:
+                raise ConnectionError("serial read failed: unplugged")
+            time.sleep(0.01)
+            return False
+
+    src = Flaky()
+    p = Pipeline(tracking_mode="simple")
+    p.source = src
+    seen = []
+    orig = p._publish
+    p._publish = lambda **kw: (seen.append(kw), orig(**kw))
+    t = threading.Thread(target=p._run, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 5.0
+    while src.inits < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    p.stop_event.set()
+    t.join(2.0)
+    assert src.inits >= 2
+    assert any("connection lost" in (kw.get("source_error") or "") for kw in seen)

@@ -244,7 +244,17 @@ class Pipeline:
                         break
                     continue
                 backoff = 0.0
-                self._scan_loop(src)
+                try:
+                    self._scan_loop(src)
+                except Exception as e:
+                    # A lost device must not kill the scan thread: report it
+                    # and fall through to teardown + re-initialize.
+                    self.tap.release()
+                    self._publish(source_ok=False, bg_ready=False, hz=0.0,
+                                  points=[], track=None,
+                                  source_error=f"lidar connection lost - {type(e).__name__}: {e}")
+                    if self.stop_event.wait(1.0):
+                        break
             finally:
                 self._teardown(src)
 
@@ -252,11 +262,12 @@ class Pipeline:
         try:
             if not src.initialize():
                 self._publish(source_ok=False, bg_ready=False,
-                              source_error="initialize() failed - port busy, missing, or wrong permissions")
+                              source_error=getattr(src, "last_error", None) or
+                              "initialize() failed - port busy, missing, or wrong permissions")
                 return False
             if not src.turnOn():
                 self._publish(source_ok=False, bg_ready=False,
-                              source_error="turnOn() failed")
+                              source_error=getattr(src, "last_error", None) or "turnOn() failed")
                 return False
         except Exception as e:
             self._publish(source_ok=False, bg_ready=False,
@@ -389,7 +400,8 @@ class Pipeline:
             self.game.new_game()
             self.tap.release()
             self.source = self._build_source()
-            self._publish(source_error=None, bg_ready=False)
+            self._publish(source_ok=False, source_error=None, bg_ready=False,
+                          calibrating=False, hz=0.0, pts_per_scan=0, points=[], track=None)
             return True
         if cmd == "set_board":
             size = op[1]

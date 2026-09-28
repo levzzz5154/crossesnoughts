@@ -1,5 +1,5 @@
-"""RealLidarSource: wraps ydlidar.CYdLidar (lazy import) behind the
-LidarSource ABC. Calibrates background from N averaged empty-board scans.
+"""RealLidarSource: direct X3 serial on Windows, lazy SDK on other systems.
+Calibrates background from N averaged empty-board scans.
 
 The canonical option block (tri_test.py values, with variable resolution) is
 applied in initialize() — without it the SDK initializes at its default
@@ -92,7 +92,7 @@ def canonical_option_block(port: str) -> dict[int, object]:
 
 
 class RealLidarSource(LidarSource):
-    """Real X3 via the installed ydlidar SWIG module (lazy import).
+    """Real X3 via PySerial on Windows or the lazy ydlidar SWIG module.
 
     The canonical option block mirrors tri_test.cpp with variable-resolution
     scans enabled. doProcessSimple copies the SWIG scan into the caller's
@@ -116,10 +116,20 @@ class RealLidarSource(LidarSource):
         # Canonical block, overridable via setlidaropt before initialize().
         self._opts: dict[int, object] = canonical_option_block(self.port)
         self._calibrated = False
+        self.last_error: str | None = None
 
     # --- lazy import -------------------------------------------------------
     def _import(self):
-        if self._ydlidar is None:
+        if self._laser is None:
+            if os.name == "nt":
+                # The Windows SDK can reject turnOn while valid X3 packets
+                # are already arriving. Read this single-channel device
+                # directly, keeping the same scan/calibration interface.
+                from core.serial_x3 import SerialX3Driver
+
+                self._laser = SerialX3Driver()
+                self._swig_scan = LaserScan()
+                return
             import ydlidar  # lazy: sim runs without it
 
             self._ydlidar = ydlidar
@@ -129,7 +139,22 @@ class RealLidarSource(LidarSource):
     def _apply_options(self) -> None:
         """Push the option block into the SWIG laser before initialize()."""
         for prop, value in self._opts.items():
-            self._laser.setlidaropt(prop, value)
+            if not self._laser.setlidaropt(prop, value):
+                raise RuntimeError(f"YDLidar SDK rejected option {prop}={value!r}")
+
+    def _failure(self, stage: str) -> str:
+        """Capture the SDK error before disconnecting clears its driver."""
+        detail = ""
+        describe = getattr(self._laser, "DescribeError", None)
+        if describe is not None:
+            try:
+                detail = describe() or ""
+                if isinstance(detail, bytes):
+                    detail = detail.decode("utf-8", errors="replace")
+                detail = str(detail).strip()
+            except Exception:
+                pass
+        return f"{stage} failed on {self.port}: {detail or 'check port, power and USB cable'}"
 
     # -- SWIG-mirroring surface -------------------------------------------
     def setlidaropt(self, prop: int, value) -> bool:
@@ -159,18 +184,22 @@ class RealLidarSource(LidarSource):
         return bool(ok), str(v)
 
     def initialize(self) -> bool:
+        self.last_error = None
         self._import()
         y = self._ydlidar
-        y.os_init()
+        if y is not None:
+            y.os_init()
         self._apply_options()
         ok = bool(self._laser.initialize())
         if not ok:
-            y.os_shutdown()
+            self.last_error = self._failure("initialize()")
         return ok
 
     def turnOn(self) -> bool:
         self._import()
-        return bool(self._laser.turnOn())
+        ok = bool(self._laser.turnOn())
+        self.last_error = None if ok else self._failure("turnOn()")
+        return ok
 
     def doProcessSimple(self, scan: LaserScan) -> bool:
         """Fill scan in place from the real device (blocks up to 1 s).
@@ -204,7 +233,8 @@ class RealLidarSource(LidarSource):
     def disconnecting(self) -> None:
         self._import()
         self._laser.disconnecting()
-        self._ydlidar.os_shutdown()
+        if self._ydlidar is not None:
+            self._ydlidar.os_shutdown()
 
     def set_object_pose(self, xy_board: tuple[float, float]) -> None:
         pass  # sim-only; real source no-ops
@@ -215,7 +245,7 @@ class RealLidarSource(LidarSource):
         then interpolated (real angles are jittered/non-uniform)."""
         self._import()
         y = self._ydlidar
-        scan = y.LaserScan()
+        scan = y.LaserScan() if y is not None else LaserScan()
         angles: list[float] = []
         ranges: list[float] = []
         for _ in range(self.n_avg):
