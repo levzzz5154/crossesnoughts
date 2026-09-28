@@ -10,6 +10,8 @@ Standalone desktop app. Two phases in one process, sharing one scan thread
 
 Settings persist to settings.json (core/settings.py); CLI flags override on
 launch. --skip-settings jumps straight into the game (automation/tests).
+Start/Preview open a child window process that owns the lidar; the settings
+screen stays usable and streams changes to it (game/live_settings.py).
 
 Pointer source (--pointer, default lidar):
   lidar  moves are committed from the TRACKED position. In sim mode the mouse
@@ -27,6 +29,7 @@ import pygame
 
 from core.settings import GameSettings
 from core.transforms import BoardAlignment
+from game.live_settings import LiveSettingsReceiver, LiveSettingsSender
 from game.pipeline import Pipeline, cell_of
 
 
@@ -90,7 +93,8 @@ def apply_cli_overrides(settings: GameSettings, args) -> None:
     settings.normalize()
 
 
-def game_phase(window, pipeline: Pipeline, settings: GameSettings) -> str:
+def game_phase(window, pipeline: Pipeline, settings: GameSettings,
+               live: LiveSettingsReceiver | None = None) -> str:
     """Run the game until ESC (back to settings) or QUIT. Returns 'settings'
     or 'quit'."""
     from game.render import GameRenderer
@@ -101,6 +105,9 @@ def game_phase(window, pipeline: Pipeline, settings: GameSettings) -> str:
     scene_size = settings.board_size
     running = True
     while running:
+        if live is not None and {"image_x", "image_o"} & live.poll():
+            renderer = GameRenderer(window, settings.image_x or None,
+                                    settings.image_o or None)
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 pipeline.set_pointer(None, None)
@@ -169,11 +176,13 @@ def game_phase(window, pipeline: Pipeline, settings: GameSettings) -> str:
 
 
 def tracking_preview_phase(window, pipeline: Pipeline,
-                           settings: GameSettings) -> str:
+                           settings: GameSettings,
+                           live: LiveSettingsReceiver | None = None) -> str:
     """Run the live board-only tracking preview until ESC or QUIT."""
     from game.preview import TrackingPreview
 
-    preview = TrackingPreview(window, pipeline, settings)
+    preview = TrackingPreview(window, pipeline, settings,
+                              on_tick=live.poll if live is not None else None)
     return preview.run()
 
 
@@ -202,6 +211,10 @@ def main() -> None:
         settings.source_kind, port=settings.source_port or None,
         replay_file=settings.replay_file or None, seed=settings.seed)
     pipeline.start()
+    # A child window follows the settings screen's live edits over stdin.
+    live = (LiveSettingsReceiver(getattr(sys.stdin, "buffer", sys.stdin),
+                                 settings, pipeline)
+            if args.game_window and sys.stdin is not None else None)
 
     from game.settings_screen import SettingsScreen
 
@@ -215,6 +228,7 @@ def main() -> None:
         while True:
             if phase == "settings":
                 child_process = None
+                child_settings = None
 
                 def resume_settings_pipeline():
                     pipeline.phase = "settings"
@@ -226,7 +240,7 @@ def main() -> None:
                     pipeline.start()
 
                 def launch_window(preview=False):
-                    nonlocal child_process
+                    nonlocal child_process, child_settings
                     if child_process is not None and child_process.poll() is None:
                         return
                     settings.save()
@@ -242,7 +256,10 @@ def main() -> None:
                         command.append("--preview")
                     if args.settings_file:
                         command += ["--settings-file", args.settings_file]
-                    child_process = subprocess.Popen(command)
+                    child_process = subprocess.Popen(
+                        command, stdin=subprocess.PIPE, text=True,
+                        encoding="utf-8")
+                    child_settings = LiveSettingsSender(child_process.stdin)
 
                 def launch_game_window():
                     launch_window(preview=False)
@@ -251,10 +268,14 @@ def main() -> None:
                     launch_window(preview=True)
 
                 def poll_child_window():
-                    nonlocal child_process
-                    if child_process is not None and child_process.poll() is not None:
-                        child_process = None
+                    nonlocal child_process, child_settings
+                    if child_process is None:
+                        return
+                    if child_process.poll() is not None:
+                        child_process = child_settings = None
                         resume_settings_pipeline()
+                    else:
+                        child_settings.send(settings)
 
                 screen = SettingsScreen(window, pipeline, settings,
                                         on_start=launch_game_window,
@@ -274,7 +295,7 @@ def main() -> None:
                     pipeline.phase = "game"
                     pipeline.new_game()
             elif phase == "preview":
-                result = tracking_preview_phase(window, pipeline, settings)
+                result = tracking_preview_phase(window, pipeline, settings, live)
                 if args.game_window:
                     break
                 if result == "quit":
@@ -282,7 +303,7 @@ def main() -> None:
                 phase = "settings"
                 pipeline.phase = "settings"
             else:
-                result = game_phase(window, pipeline, settings)
+                result = game_phase(window, pipeline, settings, live)
                 if args.game_window:
                     break
                 if result == "quit":

@@ -29,8 +29,9 @@ class TrackingPreview:
     """
 
     def __init__(self, window: pygame.Surface, pipeline: Pipeline,
-                 settings: GameSettings):
+                 settings: GameSettings, on_tick=None):
         self.window = window
+        self.on_tick = on_tick  # e.g. apply live edits from the settings screen
         self.pipeline = pipeline
         self.settings = settings
         self.font = pygame.font.SysFont("dejavusansmono, monospace", 28)
@@ -59,6 +60,8 @@ class TrackingPreview:
 
     def run(self) -> str:
         while True:
+            if self.on_tick is not None:
+                self.on_tick()
             snap = self.pipeline.snapshot()
             size = float(snap.get("board_size", self.settings.board_size))
             self._layout(size)
